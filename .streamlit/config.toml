@@ -9,7 +9,7 @@ gatherUsageStats = false
 
 [server]
 headless = true
-address = "127.0.0.1"
+address = "localhost"
 # Keep CORS+XSRF on; Streamlit refuses to disable just one of the pair, and
 # both default to safe values for a localhost-only app.
 enableXsrfProtection = true
