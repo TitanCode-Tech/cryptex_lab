@@ -1,0 +1,22 @@
+# Offline-only configuration for Streamlit.
+#
+# - gatherUsageStats=false disables Streamlit's anonymous usage telemetry.
+# - The dark theme matches the "security workstation" look the project aims for.
+# - Bind only to localhost; never expose the lab to other interfaces.
+
+[browser]
+gatherUsageStats = false
+
+[server]
+headless = true
+address = "127.0.0.1"
+# Keep CORS+XSRF on; Streamlit refuses to disable just one of the pair, and
+# both default to safe values for a localhost-only app.
+enableXsrfProtection = true
+
+[theme]
+base = "dark"
+primaryColor = "#22c55e"
+backgroundColor = "#0b1020"
+secondaryBackgroundColor = "#111827"
+textColor = "#e5e7eb"

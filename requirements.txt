@@ -1,0 +1,25 @@
+# Offline Wallet Recovery Lab dependencies.
+#
+# All of these run locally. No package listed here makes network calls at
+# runtime for our use cases (we deliberately omit bitcoinlib and any
+# blockchain-RPC client to keep the no-network guarantee easy to audit).
+#
+# Workflow: install on an online machine, then copy the whole project
+# folder (including venv/) to your offline machine.
+
+# UI
+streamlit==1.57.0
+
+# BIP39 / BIP32 / BIP44 / BIP49 / BIP84 derivation - pure-python crypto.
+bip_utils==2.12.1
+mnemonic==0.21
+
+# Forensic / export helpers - pure-python, no network.
+pycryptodome==3.23.0
+pandas==3.0.3
+fpdf2==2.8.7
+qrcode==8.2
+Pillow==12.2.0
+
+# Test-only. Safe to omit on the offline machine.
+pytest==9.0.3

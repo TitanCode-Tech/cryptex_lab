@@ -1,0 +1,35 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environment (also self-ignored by the venv module).
+venv/
+.venv/
+env/
+
+# Build / packaging artefacts
+*.egg-info/
+build/
+dist/
+
+# Editor / OS noise
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Streamlit local secrets (the project deliberately uses only .streamlit/config.toml,
+# but ignore the secrets file in case someone creates one by accident).
+.streamlit/secrets.toml
+
+# Recovery output - exported reports may contain sensitive notes the user typed.
+# Treat them as local-only.
+*.recovery_report.txt
+*.recovery_report.csv
+*.recovery_report.pdf
+wallet_recovery_report.*
