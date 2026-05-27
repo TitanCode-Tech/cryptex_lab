@@ -1,0 +1,103 @@
+PROPRIETARY SOFTWARE LICENSE
+============================
+
+Cryptex Lab
+Copyright (c) 2026 TitanCode Technologies. All rights reserved.
+
+This software and its accompanying documentation (collectively, the
+"Software") are the proprietary work of the copyright holder named
+above ("Licensor"). All title, copyright, and other intellectual
+property rights in and to the Software are owned by the Licensor.
+
+1. GRANT OF LICENSE
+-------------------
+Subject to the terms of this Agreement and any separately executed
+written agreement between the Licensor and the recipient ("Licensee"),
+the Licensor grants the Licensee a non-exclusive, non-transferable,
+revocable license to use the Software solely for the Licensee's own
+internal purposes.
+
+2. RESTRICTIONS
+---------------
+Except as expressly permitted by this Agreement or by applicable law
+that cannot be waived by contract, the Licensee shall NOT, and shall
+not permit any third party to:
+
+  (a) copy, reproduce, or distribute the Software in any form, in
+      whole or in part, to any third party;
+  (b) sublicense, sell, lease, rent, loan, host as a service, or
+      otherwise commercially exploit the Software;
+  (c) modify, adapt, translate, or create derivative works based on
+      the Software for redistribution;
+  (d) reverse engineer, decompile, or disassemble the Software,
+      except to the extent that such activity is expressly permitted
+      by applicable law notwithstanding this restriction;
+  (e) remove, alter, or obscure any proprietary notices, including
+      copyright, trademark, or attribution notices, on or in the
+      Software;
+  (f) use the Software in any manner that violates applicable law,
+      including but not limited to laws regarding unauthorized access
+      to computer systems, financial fraud, or money laundering.
+
+3. AUTHORIZED USE ONLY
+----------------------
+The Software is intended exclusively for use against cryptocurrency
+wallets that:
+
+  (a) are owned by the Licensee; or
+  (b) the Licensee is explicitly authorized in writing to recover or
+      analyze.
+
+Use of the Software against any other wallet, account, or party is
+strictly prohibited by this license, and may constitute a criminal
+offense under applicable computer-misuse and financial-crime statutes.
+
+4. NO WARRANTY
+--------------
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND
+NON-INFRINGEMENT.
+
+The Licensee acknowledges that cryptographic wallet recovery is
+inherently uncertain and that no software can guarantee recovery of
+any particular wallet. The Licensee bears all risk of use, including
+the risk of failing to recover a wallet, the risk of disclosing a
+mnemonic on an insufficiently secured machine, and the risk of
+operator error.
+
+5. LIMITATION OF LIABILITY
+--------------------------
+IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR
+OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR
+OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE
+OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+This limitation applies to direct, indirect, incidental,
+consequential, special, exemplary, and punitive damages, including
+but not limited to loss of funds, loss of data, loss of business, or
+loss of cryptographic key material.
+
+6. TERMINATION
+--------------
+This license terminates automatically upon any breach by the
+Licensee of any term of this Agreement. Upon termination, the
+Licensee must destroy all copies of the Software in its possession
+or control.
+
+7. GOVERNING LAW
+----------------
+This Agreement shall be governed by and construed in accordance
+with the laws of the jurisdiction in which the Licensor resides,
+without regard to its conflict-of-laws principles.
+
+8. ENTIRE AGREEMENT
+-------------------
+This Agreement constitutes the entire agreement between the
+Licensor and the Licensee with respect to the Software, and
+supersedes all prior or contemporaneous understandings, whether
+written or oral, with respect to the subject matter hereof.
+
+----------------------------------------------------------------
+
+For licensing inquiries, contact the Licensor directly.

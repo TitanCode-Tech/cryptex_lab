@@ -61,14 +61,309 @@ from export_utils import build_csv_report, build_pdf_report, build_qr_png, build
 
 
 # ---------------------------------------------------------------------------
-# Page chrome
+# Page chrome + custom CSS (workstation aesthetic)
 # ---------------------------------------------------------------------------
 
 st.set_page_config(
-    page_title="Offline Wallet Recovery Lab",
+    page_title="Cryptex Lab",
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+
+# Injected once per session. The intent is a restrained "forensic
+# workstation" look: monospace stack for cryptographic data (paths,
+# addresses, hashes), a single emerald accent for primary actions, refined
+# cards/buttons that read as a desktop application rather than a generic
+# Streamlit demo.
+_CUSTOM_CSS = """
+<style>
+    /* Variables - keep in sync with .streamlit/config.toml */
+    :root {
+        --owl-bg:        #0a0e1a;
+        --owl-panel:     #111827;
+        --owl-panel-2:   #0f1626;
+        --owl-border:    #1f2937;
+        --owl-border-2:  #2a3441;
+        --owl-text:      #e6edf3;
+        --owl-text-dim:  #94a3b8;
+        --owl-text-mute: #64748b;
+        --owl-accent:    #10b981;
+        --owl-accent-2:  #34d399;
+        --owl-warn:      #f59e0b;
+        --owl-danger:    #ef4444;
+        --owl-mono: ui-monospace, SFMono-Regular, Menlo, Consolas,
+                    'JetBrains Mono', 'Roboto Mono', monospace;
+    }
+
+    /* Base canvas - subtle radial accent in the top-left for depth */
+    .stApp {
+        background:
+            radial-gradient(900px 600px at -10% -20%,
+                            rgba(16,185,129,0.06) 0%,
+                            rgba(16,185,129,0.00) 60%),
+            var(--owl-bg);
+    }
+
+    /* Tighten the default block padding so the workstation feels denser */
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 4rem;
+        max-width: 1180px;
+    }
+
+    /* Sidebar - flat, slightly darker than canvas, with a hairline border */
+    section[data-testid="stSidebar"] {
+        background: #07090f;
+        border-right: 1px solid var(--owl-border);
+    }
+    section[data-testid="stSidebar"] .stRadio > label,
+    section[data-testid="stSidebar"] h1,
+    section[data-testid="stSidebar"] h2,
+    section[data-testid="stSidebar"] h3 {
+        color: var(--owl-text);
+    }
+
+    /* Headings - tighter tracking, slight weight bump */
+    h1, h2, h3, h4 {
+        letter-spacing: -0.01em;
+        font-weight: 600;
+    }
+    h1 { font-size: 1.75rem; }
+    h2 { font-size: 1.35rem; }
+    h3 { font-size: 1.10rem; }
+
+    /* Primary button - filled emerald with subtle inner highlight */
+    button[kind="primary"] {
+        background: linear-gradient(180deg,
+                    var(--owl-accent-2) 0%,
+                    var(--owl-accent)   100%) !important;
+        color: #04140d !important;
+        border: 1px solid rgba(0,0,0,0.4) !important;
+        font-weight: 600 !important;
+        letter-spacing: 0.01em;
+        box-shadow:
+            0 1px 0 rgba(255,255,255,0.18) inset,
+            0 1px 2px rgba(0,0,0,0.4);
+        transition: transform 0.05s ease, filter 0.15s ease;
+    }
+    button[kind="primary"]:hover { filter: brightness(1.07); }
+    button[kind="primary"]:active { transform: translateY(1px); }
+
+    /* Secondary buttons - bordered, transparent */
+    button[kind="secondary"] {
+        background: transparent !important;
+        color: var(--owl-text) !important;
+        border: 1px solid var(--owl-border-2) !important;
+    }
+    button[kind="secondary"]:hover {
+        border-color: var(--owl-accent) !important;
+        color: var(--owl-accent) !important;
+    }
+
+    /* Text inputs / textareas - flat dark panel, accent border on focus */
+    .stTextInput input, .stTextArea textarea,
+    .stNumberInput input, .stSelectbox > div > div {
+        background: var(--owl-panel-2) !important;
+        border: 1px solid var(--owl-border) !important;
+        color: var(--owl-text) !important;
+        border-radius: 8px !important;
+    }
+    .stTextInput input:focus, .stTextArea textarea:focus,
+    .stNumberInput input:focus {
+        border-color: var(--owl-accent) !important;
+        box-shadow: 0 0 0 3px rgba(16,185,129,0.18) !important;
+    }
+    /* Mnemonic / passphrase fields look like a terminal */
+    .stTextArea textarea, .stTextInput input[type="password"] {
+        font-family: var(--owl-mono) !important;
+        font-size: 0.92rem !important;
+    }
+
+    /* Code blocks - mnemonics, addresses, derivation paths */
+    .stCode, pre, code {
+        font-family: var(--owl-mono) !important;
+        font-size: 0.88rem !important;
+        background: var(--owl-panel-2) !important;
+        border: 1px solid var(--owl-border) !important;
+        border-radius: 8px !important;
+    }
+
+    /* Dataframe - tighter rows, monospace cells */
+    [data-testid="stDataFrame"] {
+        font-family: var(--owl-mono) !important;
+        font-size: 0.85rem !important;
+    }
+    [data-testid="stDataFrame"] td, [data-testid="stDataFrame"] th {
+        background: var(--owl-panel) !important;
+        border-color: var(--owl-border) !important;
+    }
+
+    /* Alert callouts - flatten Streamlit's default chrome */
+    [data-testid="stAlert"] {
+        border-radius: 10px !important;
+        border-left-width: 3px !important;
+    }
+
+    /* Tabs - underline-style, no rounded chrome */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 0 !important;
+        border-bottom: 1px solid var(--owl-border);
+    }
+    .stTabs [data-baseweb="tab"] {
+        background: transparent !important;
+        color: var(--owl-text-dim) !important;
+        padding: 0.6rem 1rem !important;
+        border-radius: 0 !important;
+    }
+    .stTabs [aria-selected="true"] {
+        color: var(--owl-accent) !important;
+        border-bottom: 2px solid var(--owl-accent) !important;
+    }
+
+    /* JSON viewer (forensic results) */
+    .stJson {
+        background: var(--owl-panel-2) !important;
+        border-radius: 8px !important;
+        border: 1px solid var(--owl-border) !important;
+    }
+
+    /* ===== Custom components ===== */
+
+    /* The big brand banner at the top of the Home page */
+    .owl-brand {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        padding: 1.25rem 1.4rem;
+        margin-bottom: 1.25rem;
+        background: linear-gradient(135deg,
+                    rgba(16,185,129,0.10) 0%,
+                    rgba(16,185,129,0.02) 60%,
+                    transparent 100%);
+        border: 1px solid var(--owl-border-2);
+        border-left: 3px solid var(--owl-accent);
+        border-radius: 12px;
+    }
+    .owl-brand .owl-mark {
+        font-family: var(--owl-mono);
+        font-size: 1.6rem;
+        color: var(--owl-accent);
+        line-height: 1;
+        letter-spacing: -0.04em;
+    }
+    .owl-brand h1 {
+        margin: 0 !important;
+        font-size: 1.55rem !important;
+        color: var(--owl-text);
+    }
+    .owl-brand p {
+        margin: 0.15rem 0 0 0 !important;
+        color: var(--owl-text-dim);
+        font-size: 0.92rem;
+    }
+
+    /* Page header (replaces the plain st.title on every page) */
+    .owl-page-head {
+        display: flex;
+        align-items: baseline;
+        gap: 0.75rem;
+        padding-bottom: 0.6rem;
+        margin-bottom: 1.1rem;
+        border-bottom: 1px solid var(--owl-border);
+    }
+    .owl-page-head .owl-eyebrow {
+        font-family: var(--owl-mono);
+        font-size: 0.72rem;
+        color: var(--owl-accent);
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+    }
+    .owl-page-head h1 {
+        margin: 0 !important;
+        font-size: 1.5rem !important;
+    }
+
+    /* Status pill - used in sidebar to show session counter, etc. */
+    .owl-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        padding: 0.18rem 0.55rem;
+        font-family: var(--owl-mono);
+        font-size: 0.72rem;
+        color: var(--owl-text-dim);
+        background: var(--owl-panel);
+        border: 1px solid var(--owl-border);
+        border-radius: 999px;
+    }
+    .owl-pill .owl-dot {
+        width: 6px; height: 6px; border-radius: 50%;
+        background: var(--owl-accent);
+        box-shadow: 0 0 8px var(--owl-accent);
+    }
+
+    /* Ethical banner - red-left, white-on-red glow */
+    .owl-warn-banner {
+        padding: 0.9rem 1.1rem;
+        margin: 0.5rem 0 1.25rem 0;
+        background: linear-gradient(180deg,
+                    rgba(239,68,68,0.10) 0%,
+                    rgba(239,68,68,0.04) 100%);
+        border: 1px solid rgba(239,68,68,0.35);
+        border-left: 3px solid var(--owl-danger);
+        border-radius: 10px;
+        color: #fecaca;
+        font-size: 0.92rem;
+        line-height: 1.45;
+    }
+    .owl-warn-banner strong { color: #fee2e2; }
+
+    /* Footer / build stamp */
+    .owl-footer {
+        margin-top: 3rem;
+        padding-top: 1rem;
+        border-top: 1px solid var(--owl-border);
+        text-align: center;
+        font-family: var(--owl-mono);
+        font-size: 0.72rem;
+        color: var(--owl-text-mute);
+        letter-spacing: 0.06em;
+    }
+</style>
+"""
+
+
+def _inject_css() -> None:
+    """Inject our custom CSS exactly once per session."""
+    if not st.session_state.get("_css_injected"):
+        st.markdown(_CUSTOM_CSS, unsafe_allow_html=True)
+        st.session_state["_css_injected"] = True
+
+
+def _page_header(eyebrow: str, title: str) -> None:
+    """A small all-caps eyebrow tag above a tight page title."""
+    st.markdown(
+        f'<div class="owl-page-head">'
+        f'<span class="owl-eyebrow">{eyebrow}</span>'
+        f'<h1>{title}</h1>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _brand_banner() -> None:
+    """The diamond + title banner used on the Home page."""
+    st.markdown(
+        '<div class="owl-brand">'
+        '<span class="owl-mark">[ ◆ ]</span>'
+        '<div>'
+        '<h1>Offline Wallet Recovery Lab</h1>'
+        '<p>A modular, fully-offline recovery workstation for authorised '
+        'wallet owners and forensic recovery specialists.</p>'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -161,10 +456,14 @@ def _disclaimer_gate() -> bool:
 
 
 def _ethical_banner() -> None:
-    st.error(
-        "**ONLY USE THIS TOOL FOR WALLETS YOU OWN OR ARE AUTHORIZED TO RECOVER.** "
-        "Use against third-party wallets without written authorisation is illegal "
-        "in most jurisdictions."
+    st.markdown(
+        '<div class="owl-warn-banner">'
+        '<strong>ETHICAL USE ONLY.</strong> Use this tool exclusively on '
+        'wallets you own or are explicitly authorised in writing to recover. '
+        'Use against third-party wallets without authorisation is illegal '
+        'in most jurisdictions.'
+        '</div>',
+        unsafe_allow_html=True,
     )
 
 
@@ -189,11 +488,7 @@ def _show_addresses_table(rows: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 def page_home() -> None:
-    st.title("Offline Wallet Recovery Lab")
-    st.caption(
-        "A modular, fully-offline recovery workstation for authorised wallet "
-        "owners and forensic recovery specialists."
-    )
+    _brand_banner()
     _ethical_banner()
 
     st.subheader("What this is")
@@ -259,7 +554,7 @@ def page_home() -> None:
 # ---------------------------------------------------------------------------
 
 def page_education() -> None:
-    st.title("Educational lab")
+    _page_header("DOCS", "Educational lab")
     st.caption(
         "Beginner-friendly references covering wallet architecture and the "
         "BIP standards this lab implements."
@@ -432,7 +727,7 @@ PROBLEMS = {
 
 
 def page_problem_selector() -> None:
-    st.title("Recovery workflow")
+    _page_header("WORKFLOW", "Recovery workflow")
     if not _disclaimer_gate():
         return
     _ethical_banner()
@@ -769,7 +1064,7 @@ def wf_vault() -> None:
 # ---------------------------------------------------------------------------
 
 def page_tools() -> None:
-    st.title("Tools")
+    _page_header("DIRECT ACCESS", "Tools")
     if not _disclaimer_gate():
         return
     tab1, tab2, tab3 = st.tabs(["BIP39 validator", "Address generator", "Arbitrary path"])
@@ -855,7 +1150,7 @@ def page_tools() -> None:
 # ---------------------------------------------------------------------------
 
 def page_report() -> None:
-    st.title("Recovery report")
+    _page_header("EXPORT", "Recovery report")
     if not _disclaimer_gate():
         return
 
@@ -931,7 +1226,7 @@ def page_report() -> None:
 # ---------------------------------------------------------------------------
 
 def page_clear() -> None:
-    st.title("Clear session")
+    _page_header("SESSION", "Clear session")
     st.markdown(
         "Wipes every Streamlit session-state key, including the contents of "
         "every text input on every page. Use this before walking away from "
@@ -959,17 +1254,44 @@ PAGES = {
 
 def main() -> None:
     _init_state()
+    _inject_css()
     with st.sidebar:
-        st.header("Offline Wallet Recovery Lab")
+        st.markdown(
+            '<div style="display:flex;align-items:center;gap:0.55rem;'
+            'margin:0.2rem 0 1rem 0;">'
+            '<span style="font-family:var(--owl-mono);color:var(--owl-accent);'
+            'font-size:1.25rem;letter-spacing:-0.04em;">[ ◆ ]</span>'
+            '<span style="font-weight:600;color:var(--owl-text);">'
+            'Offline Wallet<br/>Recovery Lab</span>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
         choice = st.radio(
             "Navigation", list(PAGES.keys()), label_visibility="collapsed",
         )
         st.divider()
-        st.caption("Offline only. Verify your machine is disconnected.")
+        st.markdown(
+            '<span class="owl-pill"><span class="owl-dot"></span>'
+            'OFFLINE MODE</span>',
+            unsafe_allow_html=True,
+        )
         n = len(st.session_state.get(RESULTS_KEY, []))
         if n:
-            st.caption(f"{n} derived address(es) in this session.")
+            st.markdown(
+                f'<div style="margin-top:0.5rem;"><span class="owl-pill">'
+                f'{n} address(es) derived</span></div>',
+                unsafe_allow_html=True,
+            )
+        st.caption("Verify your machine is disconnected before pasting "
+                   "any real mnemonic.")
     PAGES[choice]()
+    st.markdown(
+        '<div class="owl-footer">'
+        'OFFLINE WALLET RECOVERY LAB &middot; LOCAL BUILD &middot; '
+        'NO NETWORK &middot; NO TELEMETRY'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
 
 if __name__ == "__main__":

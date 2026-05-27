@@ -1,7 +1,9 @@
 # Offline-only configuration for Streamlit.
 #
 # - gatherUsageStats=false disables Streamlit's anonymous usage telemetry.
-# - The dark theme matches the "security workstation" look the project aims for.
+# - The palette below is a deliberate "forensic / cryptographic workstation"
+#   look: deep navy backgrounds, muted slate panels, monospace data accents,
+#   and a single signature emerald for primary actions / success states.
 # - Bind only to localhost; never expose the lab to other interfaces.
 
 [browser]
@@ -16,7 +18,18 @@ enableXsrfProtection = true
 
 [theme]
 base = "dark"
-primaryColor = "#22c55e"
-backgroundColor = "#0b1020"
+# Signature accent - cool emerald, restrained chroma so it reads "secure" not
+# "neon". Used for buttons, links, success badges, and the brand stripe.
+primaryColor = "#10b981"
+# Page canvas - deep slate-navy, near-black but warmer than #000 so heavy
+# tables don't visually vibrate.
+backgroundColor = "#0a0e1a"
+# Card / panel surface - one step lighter than the canvas for contrast.
 secondaryBackgroundColor = "#111827"
-textColor = "#e5e7eb"
+# Body text - high-contrast warm white. Tuned to land above WCAG AA on both
+# backgrounds.
+textColor = "#e6edf3"
+# Default sans for prose; we switch to a monospace stack for data via CSS
+# (mnemonic boxes, paths, addresses, hashes).
+font = "sans serif"
+
