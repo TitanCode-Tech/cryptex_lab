@@ -1,13 +1,36 @@
-# Offline Wallet Recovery Lab
+# Cryptex Lab
 
-A fully-offline, modular Python workstation for **ethical wallet recovery**.
-Bundles BIP39 validation, missing-word / typo / word-order / passphrase
-recovery engines, multi-standard HD-derivation, known-address matching,
-and metadata-only forensic file inspection behind a single Streamlit UI.
+A modular Python workstation for **ethical wallet recovery and
+blockchain forensic analysis**. Bundles BIP39 validation, missing-word
+/ typo / word-order / passphrase recovery engines, multi-standard
+HD-derivation, known-address matching, entropy analysis,
+case-management with evidence hashing, and metadata-only forensic file
+inspection behind a single Streamlit UI styled as a CRYPTEX v2 dark
+cyber forensic console.
 
 > **ONLY USE THIS TOOL FOR WALLETS YOU OWN OR ARE EXPLICITLY AUTHORIZED
 > TO RECOVER.** Use against third-party wallets without written
 > authorisation is illegal in most jurisdictions.
+
+---
+
+## Dual-mode architecture
+
+The lab runs in exactly one of two modes at a time, toggled from the
+sidebar:
+
+- **OFFLINE SAFE** (default) — all recovery, validation, vault
+  inspection, entropy, hashing, and case-management pages are
+  unlocked. No networking modules are imported. Pages that talk to a
+  live blockchain are blocked.
+- **LIVE ANALYSIS** — opt-in. Public-blockchain lookups (BTC/ETH
+  address, transaction, mempool fees) are unlocked. All sensitive
+  offline pages are blocked at the router level so a stray click can
+  never combine a seed phrase with an active network connection.
+
+The mode switch, the locked-page checks, and the `@require_offline` /
+`@require_live` decorators are defined in `modes.py`. Full security
+posture is in `SECURITY.md`.
 
 ---
 
@@ -18,13 +41,14 @@ and metadata-only forensic file inspection behind a single Streamlit UI.
   the right offline engine.
 - A reference implementation of BIP39 / BIP32 / BIP44 / BIP49 / BIP84
   with deliberate safety bounds.
+- An entropy / hash / encoding toolbox for forensic work.
+- A case-management surface: open a case, attach evidence (hashed in
+  memory only), produce whitelisted reports.
 - An educational lab covering wallet architecture, derivation paths,
   air-gapped recovery, hardware wallets, and common scams.
 
 **This is not**
 - A wallet drainer, brute-forcer, or attack tool.
-- A balance / UTXO checker (requires the network - intentionally out of
-  scope).
 - A vault password cracker. The forensic inspector reads vault
   **structure only**.
 - A cloud or SaaS service. There is no server other than the local
@@ -35,8 +59,20 @@ and metadata-only forensic file inspection behind a single Streamlit UI.
 ## Architecture
 
 ```
-offline-wallet-lab/
-├── app.py                 Streamlit UI - workflow router + pages
+cryptex-lab/
+├── app.py                 Streamlit UI - CRYPTEX v2 styling, all pages, mode-aware router
+├── modes.py               OFFLINE / LIVE mode switch, @require_offline, @require_live
+├── security_utils.py      BANNED_NETWORK_MODULES set, audit_sys_modules, wipe_session_state
+├── case_utils.py          In-memory case management, evidence hashing
+├── hash_utils.py          SHA-256/512/1, MD5, RIPEMD-160, HASH160, base58/64, BTC/ETH unit converters
+├── entropy_utils.py       Shannon, chi-square, runs test, quality verdict
+├── wallet_utils.py        BIP39 validation + standard ETH/BTC derivation
+├── derivation_utils.py    Multi-standard scans, arbitrary paths, address matching
+├── recovery_utils.py      Missing-word / typo / order / passphrase engines
+├── forensic_utils.py      MetaMask vault + wallet-file metadata (READ-ONLY)
+├── live_utils.py          Public blockchain lookups (live mode only) - sole module that imports requests
+├── export_utils.py        TXT / CSV / PDF / QR exporters (whitelisted)
+├── demo_data.py           Public BIP39 test vectors for demo flows
 ├── launcher.py            Cross-platform desktop launcher (used by shortcuts)
 ├── install.py             Cross-platform installer (venv + shortcuts)
 ├── uninstall.py           Removes shortcuts and (optionally) the venv
@@ -44,21 +80,19 @@ offline-wallet-lab/
 ├── install.sh|.bat        Thin wrappers that call install.py
 ├── uninstall.sh|.bat      Thin wrappers that call uninstall.py
 ├── update.sh|.bat         Thin wrappers that call update.py
-├── wallet_utils.py        BIP39 validation + standard ETH/BTC derivation
-├── derivation_utils.py    Multi-standard scans, arbitrary paths, matching
-├── recovery_utils.py      Missing-word / typo / order / passphrase engines
-├── forensic_utils.py      MetaMask vault + wallet-file metadata (READ-ONLY)
-├── export_utils.py        TXT / CSV / PDF / QR exporters (whitelisted)
-├── tests/                 pytest suite - BIP39 vectors, recovery, exports
+├── tests/                 pytest suite - 100+ tests, BIP39 vectors, recovery, exports, modes
 ├── .streamlit/config.toml Dark theme, localhost-only, telemetry off
+├── SECURITY.md            Threat model, no-network guarantee, audit instructions
+├── implementation_plan.md Design rationale for the rebuild
+├── task.md                Running checklist of completed and pending work
 ├── requirements.txt
 └── README.md
 ```
 
-The frontend is intentionally thin. All cryptography, recovery, and
-forensic logic lives in independent engine modules that you can import
-from a notebook, a script, or your own UI without going through
-Streamlit.
+The frontend is intentionally thin. All cryptography, recovery,
+forensic, and live-lookup logic lives in independent engine modules
+that you can import from a notebook, a script, or your own UI without
+going through Streamlit.
 
 ---
 
@@ -82,6 +116,24 @@ problem you have; the lab routes to the right engine.
 - BIP39 validator (word count, wordlist, checksum).
 - Address generator (ETH BIP44, BTC legacy / SegWit / native SegWit).
 - Arbitrary BIP32 path single-address derivation.
+- Hash / crypto tools: SHA-256/512/1, MD5, HASH160, double-SHA256,
+  RIPEMD-160, hex/base58/base64 codecs, BTC and ETH unit converters.
+- Entropy analysis lab: Shannon, chi-square, runs test, byte
+  frequency, PASS/WEAK/FAIL verdict.
+- Case management: open a case, attach evidence (hashed in memory
+  only), produce reports.
+
+### Live analysis (opt-in)
+
+When LIVE ANALYSIS mode is active, the lab exposes:
+
+- BTC address balance and transaction lookup via Blockstream.
+- ETH address balance via a public Etherscan-compatible endpoint.
+- Mempool fee estimates via mempool.space.
+
+All other pages — anything that touches a seed, key, or vault — are
+locked while live mode is active. See `SECURITY.md` for the full
+isolation contract.
 
 ### Recovery report exporter
 
