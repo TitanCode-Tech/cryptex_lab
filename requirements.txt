@@ -23,3 +23,6 @@ Pillow==12.2.0
 
 # Test-only. Safe to omit on the offline machine.
 pytest==9.0.3
+
+# Live Mode Only - lazy-imported by live_utils.py; never loaded in OFFLINE SAFE mode.
+requests==2.31.0
