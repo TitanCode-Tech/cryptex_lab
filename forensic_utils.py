@@ -1,7 +1,7 @@
 """
 forensic_utils.py
 -----------------
-Read-only, METADATA-ONLY forensic helpers for the Offline Wallet Recovery Lab.
+Read-only, METADATA-ONLY forensic helpers for CRYPTEX LAB.
 
 WHY METADATA-ONLY
 =================

@@ -1,7 +1,7 @@
 """
 install.py
 ----------
-Cross-platform installer for Offline Wallet Recovery Lab.
+Cross-platform installer for CRYPTEX LAB.
 
 What it does (in this order):
 
@@ -11,9 +11,9 @@ What it does (in this order):
      (skip with --skip-deps if you are reinstalling on an offline machine
       that already has a populated venv).
   4. Creates a platform-appropriate desktop shortcut:
-       * Linux   - ~/.local/share/applications/offline-wallet-recovery-lab.desktop
-       * macOS   - ~/Applications/Offline Wallet Recovery Lab.app/
-       * Windows - %USERPROFILE%\\Desktop\\Offline Wallet Recovery Lab.lnk
+       * Linux   - ~/.local/share/applications/cryptex-lab.desktop
+       * macOS   - ~/Applications/CRYPTEX LAB.app/
+       * Windows - %USERPROFILE%\\Desktop\\CRYPTEX LAB.lnk
                    AND a Start Menu entry under Programs/.
   5. Prints next steps.
 
@@ -39,10 +39,11 @@ from pathlib import Path
 
 
 MIN_PYTHON = (3, 10)
-APP_NAME = "Offline Wallet Recovery Lab"
-APP_SLUG = "offline-wallet-recovery-lab"
-APP_COMMENT = "Offline crypto wallet recovery workstation"
+APP_NAME = "CRYPTEX LAB"
+APP_SLUG = "cryptex-lab"
+APP_COMMENT = "CRYPTEX LAB - offline crypto wallet recovery & forensic workstation"
 ROOT = Path(__file__).resolve().parent
+ICON_PATH = ROOT / "assets" / "icon.png"
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +133,7 @@ def create_linux_shortcut() -> Path:
     apps_dir.mkdir(parents=True, exist_ok=True)
     desktop_file = apps_dir / f"{APP_SLUG}.desktop"
     exe, script = shortcut_target()
+    icon_line = f"Icon={ICON_PATH}\n        " if ICON_PATH.exists() else ""
     desktop_file.write_text(textwrap.dedent(f"""\
         [Desktop Entry]
         Type=Application
@@ -140,7 +142,7 @@ def create_linux_shortcut() -> Path:
         Comment={APP_COMMENT}
         Exec={exe} {script}
         Path={ROOT}
-        Terminal=true
+        {icon_line}Terminal=true
         Categories=Utility;Security;Network;
         StartupNotify=true
         """))

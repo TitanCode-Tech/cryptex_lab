@@ -1,7 +1,7 @@
 """
 launcher.py
 -----------
-Cross-platform launcher for the Offline Wallet Recovery Lab. Lets the app
+Cross-platform launcher for CRYPTEX LAB. Lets the app
 behave like a regular installed application: the user clicks a shortcut,
 Streamlit starts in the background, the default browser opens to the app,
 and closing the launcher (Ctrl-C / closing its console window) shuts the
@@ -146,7 +146,7 @@ def _stop(proc: subprocess.Popen) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Launch the Offline Wallet Recovery Lab as a desktop app."
+        description="Launch CRYPTEX LAB as a desktop app."
     )
     parser.add_argument("--host", default=DEFAULT_HOST,
                         help="Bind address (default: localhost). "

@@ -1,7 +1,7 @@
 """
 update.py
 ---------
-Cross-platform updater for Offline Wallet Recovery Lab.
+Cross-platform updater for CRYPTEX LAB.
 
 The lab does NOT auto-update over the network at runtime. That would
 violate its offline-only design. Instead, when you want to update:
@@ -61,7 +61,7 @@ def upgrade_dependencies() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Update the Offline Wallet Recovery Lab.")
+    parser = argparse.ArgumentParser(description="Update CRYPTEX LAB.")
     parser.add_argument("--skip-deps", action="store_true",
                         help="Skip the pip step.")
     parser.add_argument("--no-shortcut", action="store_true",

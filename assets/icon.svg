@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="50%" r="60%">
+      <stop offset="0%" stop-color="#071320"/>
+      <stop offset="70%" stop-color="#020509"/>
+      <stop offset="100%" stop-color="#000000"/>
+    </radialGradient>
+    <linearGradient id="ring" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#00d4ff"/>
+      <stop offset="100%" stop-color="#00ff9d"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="2.5" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Rounded square plate -->
+  <rect x="4" y="4" width="248" height="248" rx="44" ry="44" fill="url(#bg)" stroke="#0a3050" stroke-width="2"/>
+
+  <!-- subtle grid -->
+  <g stroke="#00d4ff" stroke-opacity="0.06" stroke-width="1">
+    <path d="M0 64 H256 M0 96 H256 M0 128 H256 M0 160 H256 M0 192 H256"/>
+    <path d="M64 0 V256 M96 0 V256 M128 0 V256 M160 0 V256 M192 0 V256"/>
+  </g>
+
+  <!-- outer ring -->
+  <g filter="url(#glow)">
+    <circle cx="128" cy="128" r="92" fill="none" stroke="url(#ring)" stroke-width="2.5" stroke-dasharray="4 6"/>
+    <circle cx="128" cy="128" r="78" fill="none" stroke="#00d4ff" stroke-width="1.5" stroke-opacity="0.6"/>
+    <circle cx="128" cy="128" r="62" fill="none" stroke="#00d4ff" stroke-width="1" stroke-opacity="0.35"/>
+  </g>
+
+  <!-- ring tick marks (cryptex letter slots) -->
+  <g stroke="#00d4ff" stroke-width="1.6" stroke-linecap="round">
+    <g transform="translate(128 128)">
+      <line x1="0" y1="-92" x2="0" y2="-82"/>
+      <g transform="rotate(30)"><line x1="0" y1="-92" x2="0" y2="-82"/></g>
+      <g transform="rotate(60)"><line x1="0" y1="-92" x2="0" y2="-82"/></g>
+      <g transform="rotate(90)"><line x1="0" y1="-92" x2="0" y2="-82"/></g>
+      <g transform="rotate(120)"><line x1="0" y1="-92" x2="0" y2="-82"/></g>
+      <g transform="rotate(150)"><line x1="0" y1="-92" x2="0" y2="-82"/></g>
+      <g transform="rotate(180)"><line x1="0" y1="-92" x2="0" y2="-82"/></g>
+      <g transform="rotate(210)"><line x1="0" y1="-92" x2="0" y2="-82"/></g>
+      <g transform="rotate(240)"><line x1="0" y1="-92" x2="0" y2="-82"/></g>
+      <g transform="rotate(270)"><line x1="0" y1="-92" x2="0" y2="-82"/></g>
+      <g transform="rotate(300)"><line x1="0" y1="-92" x2="0" y2="-82"/></g>
+      <g transform="rotate(330)"><line x1="0" y1="-92" x2="0" y2="-82"/></g>
+    </g>
+  </g>
+
+  <!-- corner crosshairs (forensic targeting) -->
+  <g stroke="#00ff9d" stroke-width="2" stroke-linecap="square" fill="none" opacity="0.85">
+    <path d="M22 36 V22 H36"/>
+    <path d="M220 22 H234 V36"/>
+    <path d="M234 220 V234 H220"/>
+    <path d="M36 234 H22 V220"/>
+  </g>
+
+  <!-- central cryptex barrel -->
+  <g filter="url(#glow)">
+    <!-- barrel body -->
+    <rect x="78" y="92" width="100" height="72" rx="10" ry="10"
+          fill="#020509" stroke="#00d4ff" stroke-width="2.5"/>
+    <!-- ring divisions -->
+    <line x1="103" y1="92" x2="103" y2="164" stroke="#00d4ff" stroke-width="1.2" stroke-opacity="0.7"/>
+    <line x1="128" y1="92" x2="128" y2="164" stroke="#00d4ff" stroke-width="1.2" stroke-opacity="0.7"/>
+    <line x1="153" y1="92" x2="153" y2="164" stroke="#00d4ff" stroke-width="1.2" stroke-opacity="0.7"/>
+    <!-- end caps -->
+    <rect x="70" y="100" width="10" height="56" rx="2" fill="#0a3050" stroke="#00d4ff" stroke-width="1.5"/>
+    <rect x="176" y="100" width="10" height="56" rx="2" fill="#0a3050" stroke="#00d4ff" stroke-width="1.5"/>
+  </g>
+
+  <!-- cryptex letters (each "ring" shows one glyph) -->
+  <g font-family="'Share Tech Mono', monospace" font-weight="700"
+     text-anchor="middle" fill="#00ff9d" font-size="22" filter="url(#glow)">
+    <text x="90.5" y="136">C</text>
+    <text x="115.5" y="136">L</text>
+    <text x="140.5" y="136" fill="#00d4ff">A</text>
+    <text x="165.5" y="136">B</text>
+  </g>
+
+  <!-- bottom label -->
+  <g font-family="'Orbitron', 'Share Tech Mono', monospace"
+     text-anchor="middle" fill="#00d4ff" letter-spacing="3"
+     font-size="11" font-weight="700" opacity="0.85">
+    <text x="128" y="200">CRYPTEX LAB</text>
+  </g>
+
+  <!-- top status pip -->
+  <g>
+    <circle cx="128" cy="48" r="3.2" fill="#00ff9d"/>
+    <circle cx="128" cy="48" r="6" fill="none" stroke="#00ff9d" stroke-opacity="0.4" stroke-width="1"/>
+  </g>
+</svg>

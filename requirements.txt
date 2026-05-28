@@ -1,4 +1,4 @@
-# Offline Wallet Recovery Lab dependencies.
+# CRYPTEX LAB dependencies.
 #
 # All of these run locally. No package listed here makes network calls at
 # runtime for our use cases (we deliberately omit bitcoinlib and any

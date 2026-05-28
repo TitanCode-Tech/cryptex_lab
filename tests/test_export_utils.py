@@ -99,7 +99,7 @@ class TestTxt:
         report = build_txt_report(_records())
         # ISO-8601 UTC: YYYY-MM-DDTHH:MM:SSZ
         assert re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", report)
-        assert "Offline Wallet Recovery Lab" in report
+        assert "CRYPTEX LAB" in report
         assert "Total addresses: 2" in report
         assert "No secrets included" in report
 

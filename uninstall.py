@@ -1,7 +1,7 @@
 """
 uninstall.py
 ------------
-Cross-platform uninstaller for Offline Wallet Recovery Lab.
+Cross-platform uninstaller for CRYPTEX LAB.
 
 By default this script:
 
@@ -22,8 +22,8 @@ import sys
 from pathlib import Path
 
 
-APP_NAME = "Offline Wallet Recovery Lab"
-APP_SLUG = "offline-wallet-recovery-lab"
+APP_NAME = "CRYPTEX LAB"
+APP_SLUG = "cryptex-lab"
 ROOT = Path(__file__).resolve().parent
 
 

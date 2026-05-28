@@ -1,7 +1,7 @@
 """
 modes.py
 --------
-Global mode management for the Offline Wallet Recovery Lab.
+Global mode management for CRYPTEX LAB.
 
 The application operates in exactly one of two modes:
     1. OFFLINE_SAFE  (the default)

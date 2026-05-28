@@ -1,7 +1,7 @@
 """
 app.py
 ------
-CRYPTEX LAB v3 - Forensic Workstation (Streamlit UI)
+CRYPTEX LAB - Forensic Workstation (Streamlit UI)
 
 Implements the CRYPTEX v2 design language over the offline backend modules.
 All sensitive math runs locally. Live-mode lookups are gated by modes.py.
@@ -12,8 +12,12 @@ from __future__ import annotations
 import html as _html
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import streamlit as st
+
+APP_NAME = "CRYPTEX LAB"
+ICON_PATH = Path(__file__).resolve().parent / "assets" / "icon.png"
 
 from modes import (
     init_mode,
@@ -1959,8 +1963,8 @@ LIVE_LOCKED_PAGES = {PAGE_LIVE_ADDR, PAGE_LIVE_TX}
 
 def main() -> None:
     st.set_page_config(
-        page_title="CRYPTEX LAB v3 - Forensic Workstation",
-        page_icon="\U0001F50D",
+        page_title=APP_NAME,
+        page_icon=str(ICON_PATH) if ICON_PATH.exists() else "\U0001F50D",
         layout="wide",
         initial_sidebar_state="expanded",
     )

@@ -1,7 +1,7 @@
 """
 export_utils.py
 ---------------
-Report and QR-code generation for the Offline Wallet Recovery Lab.
+Report and QR-code generation for CRYPTEX LAB.
 
 This module produces TXT, CSV, and PDF reports plus PNG QR codes from
 derivation records. Everything runs locally; no network calls are made
@@ -41,7 +41,7 @@ import qrcode
 from fpdf import FPDF
 
 
-_TOOL_NAME = "Offline Wallet Recovery Lab"
+_TOOL_NAME = "CRYPTEX LAB"
 
 _REPORT_FIELDS = ("coin", "address_type", "path", "address")
 

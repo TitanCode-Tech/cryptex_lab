@@ -1,7 +1,7 @@
 """
 wallet_utils.py
 ---------------
-Pure helper functions for the Offline Wallet Recovery Lab.
+Pure helper functions for CRYPTEX LAB.
 
 SECURITY DESIGN NOTES
 =====================
