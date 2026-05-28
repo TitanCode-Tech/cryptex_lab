@@ -1,1240 +1,1921 @@
 """
-Offline Wallet Recovery Lab - Streamlit workstation
-===================================================
+app.py
+------
+CRYPTEX LAB v3 - Forensic Workstation (Streamlit UI)
 
-This file is the *frontend* only. All cryptography, recovery logic, forensic
-parsing, and export rendering live in the modular engines:
-
-    wallet_utils.py       BIP39 validation + standard ETH/BTC derivation
-    derivation_utils.py   General HD-derivation, multi-standard scans, matching
-    recovery_utils.py     Missing-word / typo / word-order / passphrase engines
-    forensic_utils.py     MetaMask vault + wallet-file metadata inspection
-    export_utils.py       TXT / CSV / PDF / QR exporters (whitelisted fields)
-
-SECURITY SUMMARY
-----------------
-* No network calls. Grep the project for `requests`, `urllib`, `socket`, `http`,
-  `web3` - nothing matches.
-* The mnemonic / passphrase only ever live in local function arguments and the
-  Streamlit text widgets they came from. They are never copied into custom
-  session-state keys we own.
-* Derived public addresses ARE kept in session state so the user can build a
-  report across multiple operations. They are public information.
-* The Clear Session page wipes every key (both ours and Streamlit's own widget
-  state) and forces a rerun.
-* Exports only contain whitelisted public fields. The export module raises if
-  any record contains a forbidden field name like `mnemonic`/`seed`/etc.
-
-Run with:
-    streamlit run app.py
-(The bundled .streamlit/config.toml already pins headless+localhost+dark+
- no-telemetry, so you do not need extra CLI flags.)
+Implements the CRYPTEX v2 design language over the offline backend modules.
+All sensitive math runs locally. Live-mode lookups are gated by modes.py.
 """
 
 from __future__ import annotations
 
+import html as _html
+import json
+from datetime import datetime, timezone
+
 import streamlit as st
 
-from wallet_utils import (
-    BTC_ADDRESS_TYPES,
-    MAX_ADDRESSES_PER_REQUEST,
-    derive_btc_addresses,
-    derive_eth_addresses,
-    validate_mnemonic,
+from modes import (
+    init_mode,
+    get_current_mode,
+    set_mode,
+    is_offline,
+    is_live,
+    OFFLINE_SAFE,
+    LIVE_ANALYSIS,
 )
-from derivation_utils import (
-    compare_all_standards,
-    derive_arbitrary_path,
-    find_address_match,
-    scan_standard_paths,
+from case_utils import (
+    init_case_registry,
+    get_active_case,
+    get_all_cases,
+    create_case,
+    set_active_case,
+    add_evidence_to_active_case,
+    calculate_evidence_hash,
+)
+from security_utils import wipe_session_state
+from wallet_utils import (
+    validate_mnemonic,
+    derive_eth_addresses,
+    derive_btc_addresses,
+    BTC_ADDRESS_TYPES,
 )
 from recovery_utils import (
+    recover_missing_words,
+    suggest_typo_corrections,
+    recover_word_order,
+    test_passphrase,
     MAX_MISSING_WORDS,
     MAX_ORDER_POSITIONS,
-    recover_missing_words,
-    recover_word_order,
-    suggest_typo_corrections,
-    test_passphrase,
 )
-from forensic_utils import identify_wallet_file, inspect_metamask_vault
-from export_utils import build_csv_report, build_pdf_report, build_qr_png, build_txt_report
+from derivation_utils import find_address_match, compare_all_standards
+from forensic_utils import inspect_metamask_vault, identify_wallet_file
+from hash_utils import (
+    calculate_sha256,
+    calculate_sha512,
+    calculate_md5,
+    calculate_sha1,
+    calculate_ripemd160,
+    calculate_hash160,
+    calculate_double_sha256,
+    hex_to_bytes,
+    bytes_to_hex,
+    b64_to_bytes,
+    bytes_to_b64,
+    encode_base58,
+    decode_base58,
+    satoshi_to_btc,
+    wei_to_eth,
+)
+from entropy_utils import analyze_entropy
+from export_utils import (
+    build_txt_report,
+    build_csv_report,
+    build_pdf_report,
+    build_qr_png,
+)
+
+try:
+    import live_utils
+except ImportError:
+    live_utils = None
 
 
 # ---------------------------------------------------------------------------
-# Page chrome + custom CSS (workstation aesthetic)
+# Page constants
 # ---------------------------------------------------------------------------
 
-st.set_page_config(
-    page_title="Cryptex Lab",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+PAGE_SECURITY_LANDING = "Security Landing"
+PAGE_RECOVERY_SELECTOR = "Recovery Problem Selector"
+PAGE_CASE_MGMT = "Case Management"
+PAGE_EVIDENCE_HASH = "Evidence Hash Checker"
+
+PAGE_BIP39_VALIDATION = "BIP39 Validation Lab"
+PAGE_INCOMPLETE_SEED = "Incomplete Seed Recovery"
+PAGE_TYPO_LAB = "Typo Correction Lab"
+PAGE_WRONG_ORDER = "Wrong Word Order Helper"
+PAGE_PASSPHRASE = "BIP39 Passphrase Testing"
+PAGE_DERIVATION = "Derivation Path Scanner"
+PAGE_ADDRESS_MATCHER = "Known Address Matcher"
+PAGE_ADDRESS_GEN = "ETH/BTC Address Generator"
+PAGE_ENTROPY = "Entropy Analysis Lab"
+PAGE_VAULT_INSPECT = "MetaMask Vault Inspector"
+
+PAGE_LIVE_ADDR = "Live Address Lookup"
+PAGE_LIVE_TX = "Live TX Lookup"
+
+PAGE_HASH_TOOLS = "Hash/Crypto Tools"
+PAGE_AIRGAP_GUIDE = "Air-Gapped Ops Guide"
+PAGE_EXPORTER = "Recovery Report Exporter"
+PAGE_EDUCATION = "Educational Lab"
+PAGE_WIPE = "Clear Session"
 
 
-# Injected once per session. The intent is a restrained "forensic
-# workstation" look: monospace stack for cryptographic data (paths,
-# addresses, hashes), a single emerald accent for primary actions, refined
-# cards/buttons that read as a desktop application rather than a generic
-# Streamlit demo.
-_CUSTOM_CSS = """
+# Page icon glyphs (unicode entities, matching v2 HTML aesthetic)
+PAGE_ICONS = {
+    PAGE_SECURITY_LANDING: "\U0001F6E1",
+    PAGE_RECOVERY_SELECTOR: "\U0001F50D",
+    PAGE_CASE_MGMT: "\U0001F4C1",
+    PAGE_EVIDENCE_HASH: "\U0001F9EC",
+    PAGE_BIP39_VALIDATION: "\U0001F510",
+    PAGE_INCOMPLETE_SEED: "\U0001F50E",
+    PAGE_TYPO_LAB: "\U0001F520",
+    PAGE_WRONG_ORDER: "\U0001F500",
+    PAGE_PASSPHRASE: "\U0001F511",
+    PAGE_DERIVATION: "⚡",
+    PAGE_ADDRESS_MATCHER: "\U0001F3AF",
+    PAGE_ADDRESS_GEN: "\U0001F4B3",
+    PAGE_ENTROPY: "\U0001F3B2",
+    PAGE_VAULT_INSPECT: "\U0001F98A",
+    PAGE_LIVE_ADDR: "\U0001F4E1",
+    PAGE_LIVE_TX: "\U0001F4E1",
+    PAGE_HASH_TOOLS: "\U0001F9EE",
+    PAGE_AIRGAP_GUIDE: "\U0001F6AB",
+    PAGE_EXPORTER: "\U0001F4CA",
+    PAGE_EDUCATION: "\U0001F4DA",
+    PAGE_WIPE: "\U0001F9F9",
+}
+
+
+# ---------------------------------------------------------------------------
+# CSS injection
+# ---------------------------------------------------------------------------
+
+CRYPTEX_CSS = """
 <style>
-    /* Variables - keep in sync with .streamlit/config.toml */
-    :root {
-        --owl-bg:        #0a0e1a;
-        --owl-panel:     #111827;
-        --owl-panel-2:   #0f1626;
-        --owl-border:    #1f2937;
-        --owl-border-2:  #2a3441;
-        --owl-text:      #e6edf3;
-        --owl-text-dim:  #94a3b8;
-        --owl-text-mute: #64748b;
-        --owl-accent:    #10b981;
-        --owl-accent-2:  #34d399;
-        --owl-warn:      #f59e0b;
-        --owl-danger:    #ef4444;
-        --owl-mono: ui-monospace, SFMono-Regular, Menlo, Consolas,
-                    'JetBrains Mono', 'Roboto Mono', monospace;
-    }
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;400;600;700&display=swap');
 
-    /* Base canvas - subtle radial accent in the top-left for depth */
-    .stApp {
-        background:
-            radial-gradient(900px 600px at -10% -20%,
-                            rgba(16,185,129,0.06) 0%,
-                            rgba(16,185,129,0.00) 60%),
-            var(--owl-bg);
-    }
+:root {
+  --bg:#020509; --panel:#050d14; --p2:#071320; --border:#0a3050;
+  --a:#00d4ff; --a2:#00ff9d; --a3:#ff6b35; --a4:#bf5fff;
+  --red:#ff3d3d; --txt:#c8e8f5; --dim:#4a7a9b;
+  --glow:0 0 20px rgba(0,212,255,.3);
+}
 
-    /* Tighten the default block padding so the workstation feels denser */
-    .block-container {
-        padding-top: 2rem;
-        padding-bottom: 4rem;
-        max-width: 1180px;
-    }
+html, body, .stApp, [data-testid="stAppViewContainer"] {
+  background:var(--bg) !important;
+  color:var(--txt) !important;
+  font-family:'Rajdhani', sans-serif !important;
+}
 
-    /* Sidebar - flat, slightly darker than canvas, with a hairline border */
-    section[data-testid="stSidebar"] {
-        background: #07090f;
-        border-right: 1px solid var(--owl-border);
-    }
-    section[data-testid="stSidebar"] .stRadio > label,
-    section[data-testid="stSidebar"] h1,
-    section[data-testid="stSidebar"] h2,
-    section[data-testid="stSidebar"] h3 {
-        color: var(--owl-text);
-    }
+[data-testid="stHeader"] {background:transparent !important;}
+[data-testid="stToolbar"] {display:none !important;}
+footer {visibility:hidden;}
+#MainMenu {visibility:hidden;}
 
-    /* Headings - tighter tracking, slight weight bump */
-    h1, h2, h3, h4 {
-        letter-spacing: -0.01em;
-        font-weight: 600;
-    }
-    h1 { font-size: 1.75rem; }
-    h2 { font-size: 1.35rem; }
-    h3 { font-size: 1.10rem; }
+/* Scanlines overlay */
+.stApp::before {
+  content:''; position:fixed; inset:0;
+  background:repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,.04) 2px, rgba(0,0,0,.04) 4px);
+  pointer-events:none; z-index:9999;
+}
 
-    /* Primary button - filled emerald with subtle inner highlight */
-    button[kind="primary"] {
-        background: linear-gradient(180deg,
-                    var(--owl-accent-2) 0%,
-                    var(--owl-accent)   100%) !important;
-        color: #04140d !important;
-        border: 1px solid rgba(0,0,0,0.4) !important;
-        font-weight: 600 !important;
-        letter-spacing: 0.01em;
-        box-shadow:
-            0 1px 0 rgba(255,255,255,0.18) inset,
-            0 1px 2px rgba(0,0,0,0.4);
-        transition: transform 0.05s ease, filter 0.15s ease;
-    }
-    button[kind="primary"]:hover { filter: brightness(1.07); }
-    button[kind="primary"]:active { transform: translateY(1px); }
+/* Grid overlay */
+[data-testid="stAppViewContainer"]::after {
+  content:''; position:fixed; inset:0;
+  background-image:linear-gradient(rgba(0,212,255,.03) 1px, transparent 1px),
+                    linear-gradient(90deg, rgba(0,212,255,.03) 1px, transparent 1px);
+  background-size:40px 40px; pointer-events:none; z-index:0;
+}
 
-    /* Secondary buttons - bordered, transparent */
-    button[kind="secondary"] {
-        background: transparent !important;
-        color: var(--owl-text) !important;
-        border: 1px solid var(--owl-border-2) !important;
-    }
-    button[kind="secondary"]:hover {
-        border-color: var(--owl-accent) !important;
-        color: var(--owl-accent) !important;
-    }
+.main, .block-container {
+  background:transparent !important;
+  padding-top:1rem !important;
+  max-width:100% !important;
+}
 
-    /* Text inputs / textareas - flat dark panel, accent border on focus */
-    .stTextInput input, .stTextArea textarea,
-    .stNumberInput input, .stSelectbox > div > div {
-        background: var(--owl-panel-2) !important;
-        border: 1px solid var(--owl-border) !important;
-        color: var(--owl-text) !important;
-        border-radius: 8px !important;
-    }
-    .stTextInput input:focus, .stTextArea textarea:focus,
-    .stNumberInput input:focus {
-        border-color: var(--owl-accent) !important;
-        box-shadow: 0 0 0 3px rgba(16,185,129,0.18) !important;
-    }
-    /* Mnemonic / passphrase fields look like a terminal */
-    .stTextArea textarea, .stTextInput input[type="password"] {
-        font-family: var(--owl-mono) !important;
-        font-size: 0.92rem !important;
-    }
+/* Sidebar styling */
+[data-testid="stSidebar"], [data-testid="stSidebar"] > div {
+  background:var(--panel) !important;
+  border-right:1px solid var(--border);
+}
+[data-testid="stSidebar"] .stRadio > label {display:none;}
+[data-testid="stSidebar"] .stRadio > div {gap:1px;}
+[data-testid="stSidebar"] .stRadio label {
+  font-family:'Rajdhani', sans-serif !important;
+  font-size:12px !important; font-weight:600;
+  color:var(--dim) !important;
+  padding:7px 14px !important;
+  border-left:2px solid transparent;
+  transition:all .12s;
+  cursor:pointer;
+  display:flex; align-items:center;
+  width:100%;
+}
+[data-testid="stSidebar"] .stRadio label:hover {
+  background:rgba(0,212,255,.05);
+  color:var(--txt) !important;
+}
+[data-testid="stSidebar"] .stRadio label[data-checked="true"],
+[data-testid="stSidebar"] .stRadio input:checked + div {
+  background:rgba(0,212,255,.09);
+  border-left-color:var(--a);
+  color:var(--a) !important;
+}
+[data-testid="stSidebar"] [data-baseweb="radio"] > div:first-child {display:none;}
 
-    /* Code blocks - mnemonics, addresses, derivation paths */
-    .stCode, pre, code {
-        font-family: var(--owl-mono) !important;
-        font-size: 0.88rem !important;
-        background: var(--owl-panel-2) !important;
-        border: 1px solid var(--owl-border) !important;
-        border-radius: 8px !important;
-    }
+/* Headings */
+h1, h2, h3, h4, h5, h6 {
+  font-family:'Orbitron', sans-serif !important;
+  color:var(--a) !important;
+  letter-spacing:2px !important;
+  text-shadow:var(--glow);
+}
 
-    /* Dataframe - tighter rows, monospace cells */
-    [data-testid="stDataFrame"] {
-        font-family: var(--owl-mono) !important;
-        font-size: 0.85rem !important;
-    }
-    [data-testid="stDataFrame"] td, [data-testid="stDataFrame"] th {
-        background: var(--owl-panel) !important;
-        border-color: var(--owl-border) !important;
-    }
+/* Buttons - default cyan */
+.stButton > button, .stDownloadButton > button {
+  background:rgba(0,212,255,.1) !important;
+  border:1px solid var(--a) !important;
+  color:var(--a) !important;
+  font-family:'Share Tech Mono', monospace !important;
+  font-size:11px !important;
+  letter-spacing:1px !important;
+  border-radius:1px !important;
+  padding:7px 14px !important;
+  transition:all .12s !important;
+  box-shadow:none !important;
+}
+.stButton > button:hover, .stDownloadButton > button:hover {
+  background:rgba(0,212,255,.22) !important;
+  color:var(--a) !important;
+  border-color:var(--a) !important;
+}
+.stButton > button:focus, .stDownloadButton > button:focus {
+  box-shadow:0 0 0 1px var(--a) !important;
+}
 
-    /* Alert callouts - flatten Streamlit's default chrome */
-    [data-testid="stAlert"] {
-        border-radius: 10px !important;
-        border-left-width: 3px !important;
-    }
+/* Variants applied via parent wrapper */
+.btn-green .stButton > button {
+  background:rgba(0,255,157,.1) !important;
+  border-color:var(--a2) !important; color:var(--a2) !important;
+}
+.btn-green .stButton > button:hover {background:rgba(0,255,157,.22) !important;}
+.btn-orange .stButton > button {
+  background:rgba(255,107,53,.1) !important;
+  border-color:var(--a3) !important; color:var(--a3) !important;
+}
+.btn-orange .stButton > button:hover {background:rgba(255,107,53,.22) !important;}
+.btn-red .stButton > button {
+  background:rgba(255,61,61,.1) !important;
+  border-color:var(--red) !important; color:var(--red) !important;
+}
+.btn-red .stButton > button:hover {background:rgba(255,61,61,.22) !important;}
+.btn-purple .stButton > button {
+  background:rgba(191,95,255,.1) !important;
+  border-color:var(--a4) !important; color:var(--a4) !important;
+}
+.btn-purple .stButton > button:hover {background:rgba(191,95,255,.22) !important;}
 
-    /* Tabs - underline-style, no rounded chrome */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 0 !important;
-        border-bottom: 1px solid var(--owl-border);
-    }
-    .stTabs [data-baseweb="tab"] {
-        background: transparent !important;
-        color: var(--owl-text-dim) !important;
-        padding: 0.6rem 1rem !important;
-        border-radius: 0 !important;
-    }
-    .stTabs [aria-selected="true"] {
-        color: var(--owl-accent) !important;
-        border-bottom: 2px solid var(--owl-accent) !important;
-    }
+/* Inputs */
+.stTextInput input, .stTextArea textarea, .stNumberInput input,
+[data-baseweb="select"] > div, .stSelectbox > div > div {
+  background:#000 !important;
+  border:1px solid var(--border) !important;
+  color:var(--txt) !important;
+  font-family:'Share Tech Mono', monospace !important;
+  font-size:12px !important;
+  border-radius:1px !important;
+}
+.stTextInput input:focus, .stTextArea textarea:focus, .stNumberInput input:focus {
+  border-color:var(--a) !important;
+  box-shadow:none !important;
+}
+.stTextInput label, .stTextArea label, .stSelectbox label, .stNumberInput label, .stRadio label, .stFileUploader label {
+  font-family:'Share Tech Mono', monospace !important;
+  font-size:10px !important;
+  color:var(--dim) !important;
+  letter-spacing:1px !important;
+  text-transform:uppercase;
+}
 
-    /* JSON viewer (forensic results) */
-    .stJson {
-        background: var(--owl-panel-2) !important;
-        border-radius: 8px !important;
-        border: 1px solid var(--owl-border) !important;
-    }
+/* File uploader */
+[data-testid="stFileUploader"] section, [data-testid="stFileUploaderDropzone"] {
+  background:#000 !important;
+  border:2px dashed var(--border) !important;
+  border-radius:1px !important;
+}
+[data-testid="stFileUploader"] section:hover {border-color:var(--a) !important;}
 
-    /* ===== Custom components ===== */
+/* Code blocks */
+pre, code, .stCode, [data-testid="stCodeBlock"] {
+  background:#000 !important;
+  border:1px solid var(--border);
+  color:var(--a2) !important;
+  font-family:'Share Tech Mono', monospace !important;
+  font-size:11px !important;
+}
 
-    /* The big brand banner at the top of the Home page */
-    .owl-brand {
-        display: flex;
-        align-items: center;
-        gap: 1rem;
-        padding: 1.25rem 1.4rem;
-        margin-bottom: 1.25rem;
-        background: linear-gradient(135deg,
-                    rgba(16,185,129,0.10) 0%,
-                    rgba(16,185,129,0.02) 60%,
-                    transparent 100%);
-        border: 1px solid var(--owl-border-2);
-        border-left: 3px solid var(--owl-accent);
-        border-radius: 12px;
-    }
-    .owl-brand .owl-mark {
-        font-family: var(--owl-mono);
-        font-size: 1.6rem;
-        color: var(--owl-accent);
-        line-height: 1;
-        letter-spacing: -0.04em;
-    }
-    .owl-brand h1 {
-        margin: 0 !important;
-        font-size: 1.55rem !important;
-        color: var(--owl-text);
-    }
-    .owl-brand p {
-        margin: 0.15rem 0 0 0 !important;
-        color: var(--owl-text-dim);
-        font-size: 0.92rem;
-    }
+/* Metric */
+[data-testid="stMetric"] {
+  background:var(--p2);
+  border:1px solid var(--border);
+  padding:12px !important;
+}
+[data-testid="stMetricLabel"] {
+  font-family:'Share Tech Mono', monospace !important;
+  font-size:9px !important;
+  color:var(--dim) !important;
+  letter-spacing:1px;
+}
+[data-testid="stMetricValue"] {
+  font-family:'Orbitron', sans-serif !important;
+  color:var(--a) !important;
+  font-size:22px !important;
+  font-weight:700 !important;
+}
 
-    /* Page header (replaces the plain st.title on every page) */
-    .owl-page-head {
-        display: flex;
-        align-items: baseline;
-        gap: 0.75rem;
-        padding-bottom: 0.6rem;
-        margin-bottom: 1.1rem;
-        border-bottom: 1px solid var(--owl-border);
-    }
-    .owl-page-head .owl-eyebrow {
-        font-family: var(--owl-mono);
-        font-size: 0.72rem;
-        color: var(--owl-accent);
-        letter-spacing: 0.18em;
-        text-transform: uppercase;
-    }
-    .owl-page-head h1 {
-        margin: 0 !important;
-        font-size: 1.5rem !important;
-    }
+/* Alerts */
+.stAlert {
+  background:var(--p2) !important;
+  border:1px solid var(--border) !important;
+  border-radius:1px !important;
+  font-family:'Share Tech Mono', monospace !important;
+  font-size:11px !important;
+}
+.stAlert[data-baseweb="notification"] [data-testid="stMarkdownContainer"] p {color:var(--txt) !important;}
 
-    /* Status pill - used in sidebar to show session counter, etc. */
-    .owl-pill {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.35rem;
-        padding: 0.18rem 0.55rem;
-        font-family: var(--owl-mono);
-        font-size: 0.72rem;
-        color: var(--owl-text-dim);
-        background: var(--owl-panel);
-        border: 1px solid var(--owl-border);
-        border-radius: 999px;
-    }
-    .owl-pill .owl-dot {
-        width: 6px; height: 6px; border-radius: 50%;
-        background: var(--owl-accent);
-        box-shadow: 0 0 8px var(--owl-accent);
-    }
+/* Tabs */
+.stTabs [data-baseweb="tab-list"] {
+  gap:4px; background:transparent; border-bottom:1px solid var(--border);
+}
+.stTabs [data-baseweb="tab"] {
+  background:transparent !important;
+  color:var(--dim) !important;
+  font-family:'Share Tech Mono', monospace !important;
+  font-size:10px !important;
+  letter-spacing:1px !important;
+  border:1px solid var(--border) !important;
+  border-bottom:none !important;
+  padding:6px 14px !important;
+}
+.stTabs [aria-selected="true"] {
+  color:var(--a) !important;
+  border-color:var(--a) !important;
+  background:rgba(0,212,255,.08) !important;
+}
 
-    /* Ethical banner - red-left, white-on-red glow */
-    .owl-warn-banner {
-        padding: 0.9rem 1.1rem;
-        margin: 0.5rem 0 1.25rem 0;
-        background: linear-gradient(180deg,
-                    rgba(239,68,68,0.10) 0%,
-                    rgba(239,68,68,0.04) 100%);
-        border: 1px solid rgba(239,68,68,0.35);
-        border-left: 3px solid var(--owl-danger);
-        border-radius: 10px;
-        color: #fecaca;
-        font-size: 0.92rem;
-        line-height: 1.45;
-    }
-    .owl-warn-banner strong { color: #fee2e2; }
+/* DataFrame */
+[data-testid="stDataFrame"] {
+  background:var(--p2) !important;
+  border:1px solid var(--border);
+}
 
-    /* Footer / build stamp */
-    .owl-footer {
-        margin-top: 3rem;
-        padding-top: 1rem;
-        border-top: 1px solid var(--owl-border);
-        text-align: center;
-        font-family: var(--owl-mono);
-        font-size: 0.72rem;
-        color: var(--owl-text-mute);
-        letter-spacing: 0.06em;
-    }
+/* Expander */
+[data-testid="stExpander"] {
+  background:var(--p2) !important;
+  border:1px solid var(--border) !important;
+  border-radius:1px !important;
+}
+[data-testid="stExpander"] summary {
+  font-family:'Share Tech Mono', monospace !important;
+  font-size:10px !important;
+  color:var(--a) !important;
+  letter-spacing:1px;
+}
+
+/* Divider */
+hr, [data-testid="stDivider"] {
+  border-color:var(--border) !important;
+  margin:8px 0 !important;
+}
+
+/* Caption */
+.stCaption, [data-testid="stCaptionContainer"] {
+  font-family:'Share Tech Mono', monospace !important;
+  font-size:9px !important;
+  color:var(--dim) !important;
+  letter-spacing:1px !important;
+}
+
+/* Markdown defaults */
+.stMarkdown, [data-testid="stMarkdownContainer"] {
+  font-family:'Rajdhani', sans-serif !important;
+  color:var(--txt);
+}
+
+/* --- Custom-rendered chrome (header/section/box/term) --- */
+.cx-header {
+  position:sticky; top:0; z-index:100;
+  background:rgba(2,5,9,.97); backdrop-filter:blur(10px);
+  border-bottom:1px solid var(--border);
+  padding:8px 14px; margin:-1rem -1rem 14px -1rem;
+  display:flex; align-items:center; justify-content:space-between;
+}
+.cx-logo {
+  font-family:'Orbitron', sans-serif; font-size:18px; font-weight:900;
+  color:var(--a); text-shadow:var(--glow); letter-spacing:4px;
+}
+.cx-logo em {color:var(--a2); font-style:normal;}
+.cx-logo small {
+  font-family:'Share Tech Mono', monospace; font-size:10px;
+  color:var(--dim); letter-spacing:1px; margin-left:10px;
+}
+.cx-hbar {display:flex; align-items:center; gap:14px; flex-wrap:wrap;}
+.cx-hitem {
+  display:flex; align-items:center; gap:6px;
+  font-family:'Share Tech Mono', monospace;
+  font-size:10px; color:var(--dim);
+}
+.cx-dot {
+  width:7px; height:7px; border-radius:50%;
+  background:var(--a2); animation:cx-blink 2s infinite;
+}
+.cx-dot.red {background:var(--red);}
+.cx-dot.orange {background:var(--a3);}
+@keyframes cx-blink {0%,100% {opacity:1} 50% {opacity:.4}}
+.cx-badge {
+  font-family:'Orbitron', sans-serif; font-size:9px; font-weight:700;
+  padding:3px 9px; letter-spacing:2px;
+  border:1px solid var(--a3); color:var(--a3);
+}
+.cx-badge.green {border-color:var(--a2); color:var(--a2);}
+.cx-badge.red {border-color:var(--red); color:var(--red);}
+
+.cx-section {
+  display:flex; align-items:center; gap:10px;
+  margin:6px 0 14px 0; padding-bottom:8px;
+  border-bottom:1px solid var(--border);
+}
+.cx-section .title {
+  font-family:'Orbitron', sans-serif; font-size:13px; font-weight:700;
+  color:var(--a); letter-spacing:2px;
+}
+.cx-section .sub {
+  font-size:10px; color:var(--dim); margin-left:auto;
+  font-family:'Share Tech Mono', monospace; letter-spacing:1px;
+}
+
+.cx-box {
+  background:var(--p2); border:1px solid var(--border);
+  border-radius:2px; margin-bottom:14px; overflow:hidden;
+}
+.cx-box .head {
+  display:flex; align-items:center; justify-content:space-between;
+  padding:7px 13px;
+  background:rgba(0,212,255,.05);
+  border-bottom:1px solid var(--border);
+  font-family:'Share Tech Mono', monospace;
+  font-size:11px; color:var(--a);
+  letter-spacing:1px;
+}
+.cx-box .head .live {color:var(--a2); font-size:9px; animation:cx-blink 1.5s infinite;}
+.cx-box .body {padding:13px;}
+
+/* Status cards grid */
+.cx-cards {
+  display:grid; gap:11px; margin-bottom:14px;
+}
+.cx-cards.g2 {grid-template-columns:1fr 1fr;}
+.cx-cards.g3 {grid-template-columns:1fr 1fr 1fr;}
+.cx-cards.g4 {grid-template-columns:1fr 1fr 1fr 1fr;}
+.cx-sc {
+  background:var(--p2); border:1px solid var(--border);
+  padding:12px;
+}
+.cx-sc .sl {
+  font-family:'Share Tech Mono', monospace;
+  font-size:9px; color:var(--dim); margin-bottom:5px; letter-spacing:1px;
+}
+.cx-sc .sv {
+  font-family:'Orbitron', sans-serif;
+  font-size:20px; font-weight:700; color:var(--a);
+}
+.cx-sc .sv.green {color:var(--a2);}
+.cx-sc .sv.orange {color:var(--a3);}
+.cx-sc .sv.red {color:var(--red);}
+.cx-sc .sd {font-size:10px; color:var(--dim); margin-top:3px;}
+
+/* Terminal */
+.cx-term {
+  background:#000; border:1px solid var(--border);
+  border-radius:2px; overflow:hidden; margin-bottom:14px;
+}
+.cx-term .tb {
+  display:flex; align-items:center; gap:7px;
+  padding:5px 11px; background:#0a0a0a; border-bottom:1px solid #111;
+}
+.cx-term .td {width:9px; height:9px; border-radius:50%;}
+.cx-term .tt {
+  font-family:'Share Tech Mono', monospace;
+  font-size:10px; color:#444; margin-left:5px; flex:1;
+}
+.cx-term .to {
+  padding:12px; font-family:'Share Tech Mono', monospace;
+  font-size:11px; line-height:1.65;
+  min-height:130px; max-height:300px; overflow-y:auto;
+}
+.cx-term .tp {color:var(--a2);}
+.cx-term .tl {display:block;}
+.cx-term .c-ok {color:var(--a2);}
+.cx-term .c-info {color:var(--a);}
+.cx-term .c-warn {color:var(--a3);}
+.cx-term .c-err {color:var(--red);}
+.cx-term .c-dim {color:#666;}
+.cx-term .c-cmd {color:#fff;}
+
+/* Result block */
+.cx-rblock {
+  background:rgba(0,255,157,.04);
+  border:1px solid rgba(0,255,157,.2);
+  padding:12px; margin-top:10px;
+  font-family:'Share Tech Mono', monospace;
+  font-size:11px; line-height:1.7;
+}
+.cx-rblock .rk {color:var(--dim);}
+.cx-rblock .rv {color:var(--a2);}
+.cx-rblock .ra {color:var(--a);}
+.cx-rblock .ro {color:var(--a3);}
+.cx-rblock .rr {color:var(--red);}
+
+/* Compact table */
+.cx-dt {
+  width:100%; border-collapse:collapse; font-size:11px;
+  font-family:'Share Tech Mono', monospace;
+  background:var(--p2);
+}
+.cx-dt th {
+  font-size:9px; color:var(--dim); letter-spacing:1px;
+  padding:7px 9px; text-align:left;
+  border-bottom:1px solid var(--border);
+  background:rgba(0,212,255,.03);
+}
+.cx-dt td {
+  padding:7px 9px;
+  border-bottom:1px solid rgba(10,48,80,.4);
+  font-size:10px; color:var(--txt);
+  vertical-align:middle; word-break:break-all;
+}
+.cx-dt tr:hover td {background:rgba(0,212,255,.04);}
+.cx-tag {
+  display:inline-block; padding:1px 7px;
+  font-size:9px; border-radius:1px; border:1px solid currentColor;
+}
+.cx-tag.green {color:var(--a2);}
+.cx-tag.orange {color:var(--a3);}
+.cx-tag.red {color:var(--red);}
+.cx-tag.cyan {color:var(--a);}
+.cx-tag.purple {color:var(--a4);}
+
+/* Active case banner */
+.cx-banner {
+  display:flex; align-items:center; gap:14px;
+  background:rgba(0,212,255,.06);
+  border:1px solid var(--border);
+  border-left:3px solid var(--a);
+  padding:8px 14px; margin-bottom:14px;
+  font-family:'Share Tech Mono', monospace; font-size:11px;
+}
+.cx-banner.muted {
+  border-left-color:var(--dim);
+  background:rgba(74,122,155,.04);
+  color:var(--dim);
+}
+.cx-banner .label {color:var(--dim); letter-spacing:1px;}
+.cx-banner .val {color:var(--a); margin-right:14px;}
+.cx-banner .pulse {
+  width:7px; height:7px; border-radius:50%;
+  background:var(--a2); animation:cx-blink 1.4s infinite;
+}
+
+/* Sidebar nav category header */
+.cx-ns {
+  padding:9px 14px 3px;
+  font-family:'Share Tech Mono', monospace;
+  font-size:9px; color:var(--dim); letter-spacing:2px;
+  text-transform:uppercase;
+}
+
+/* Sidebar logo */
+.cx-sb-logo {
+  font-family:'Orbitron', sans-serif; font-weight:900;
+  font-size:18px; color:var(--a); letter-spacing:4px;
+  text-shadow:var(--glow);
+  padding:10px 14px 4px;
+}
+.cx-sb-logo em {color:var(--a2); font-style:normal;}
+.cx-sb-sub {
+  padding:0 14px 8px;
+  font-family:'Share Tech Mono', monospace;
+  font-size:9px; color:var(--dim); letter-spacing:1px;
+}
+
+/* Mode pills */
+.cx-mode {
+  margin:6px 14px 10px; padding:6px 10px;
+  font-family:'Share Tech Mono', monospace; font-size:10px;
+  border-radius:1px; letter-spacing:1px; text-align:center;
+}
+.cx-mode.off {background:rgba(0,255,157,.08); border:1px solid var(--a2); color:var(--a2);}
+.cx-mode.live {background:rgba(255,61,61,.08); border:1px solid var(--red); color:var(--red);}
+
+/* Make Streamlit's columns slightly tighter for grid feel */
+[data-testid="column"] {padding:0 6px;}
+
+/* Generic muted card */
+.cx-card {
+  background:var(--p2); border:1px solid var(--border);
+  padding:13px; margin-bottom:10px;
+  font-family:'Share Tech Mono', monospace; font-size:11px;
+}
+.cx-card h4 {
+  font-family:'Orbitron', sans-serif; font-size:12px;
+  color:var(--a); letter-spacing:2px; margin-bottom:6px;
+}
 </style>
 """
 
 
-def _inject_css() -> None:
-    """Inject our custom CSS exactly once per session."""
-    if not st.session_state.get("_css_injected"):
-        st.markdown(_CUSTOM_CSS, unsafe_allow_html=True)
-        st.session_state["_css_injected"] = True
+def inject_cryptex_css() -> None:
+    st.markdown(CRYPTEX_CSS, unsafe_allow_html=True)
 
 
-def _page_header(eyebrow: str, title: str) -> None:
-    """A small all-caps eyebrow tag above a tight page title."""
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _esc(s) -> str:
+    return _html.escape(str(s))
+
+
+def render_header() -> None:
+    mode = get_current_mode()
+    cases = get_all_cases()
+    case_count = len(cases)
+    if mode == OFFLINE_SAFE:
+        mode_badge = '<span class="cx-badge green">OFFLINE SAFE</span>'
+        mode_dot = '<div class="cx-hitem"><div class="cx-dot"></div>AIRGAP OK</div>'
+    else:
+        mode_badge = '<span class="cx-badge red">LIVE ANALYSIS</span>'
+        mode_dot = '<div class="cx-hitem"><div class="cx-dot red"></div>NETWORK ACTIVE</div>'
+
+    html_block = f"""
+    <div class="cx-header">
+      <div class="cx-logo">CRYPT<em>EX</em> LAB<small>v3 // FORENSIC WORKSTATION</small></div>
+      <div class="cx-hbar">
+        {mode_dot}
+        <div class="cx-hitem"><div class="cx-dot"></div>{case_count} CASES</div>
+        <div class="cx-hitem"><div class="cx-dot orange"></div>SESSION LIVE</div>
+        {mode_badge}
+      </div>
+    </div>
+    """
+    st.markdown(html_block, unsafe_allow_html=True)
+
+
+def render_section_header(icon: str, title: str, subtitle: str = "") -> None:
+    sub = f'<span class="sub">{_esc(subtitle)}</span>' if subtitle else ""
     st.markdown(
-        f'<div class="owl-page-head">'
-        f'<span class="owl-eyebrow">{eyebrow}</span>'
-        f'<h1>{title}</h1>'
-        f'</div>',
+        f'<div class="cx-section"><span class="title">{_esc(icon)} {_esc(title)}</span>{sub}</div>',
         unsafe_allow_html=True,
     )
 
 
-def _brand_banner() -> None:
-    """The diamond + title banner used on the Home page."""
+def open_box(header: str, live: bool = False, accent: str = "") -> None:
+    live_html = '<span class="live">&#9679; LIVE</span>' if live else ""
     st.markdown(
-        '<div class="owl-brand">'
-        '<span class="owl-mark">[ ◆ ]</span>'
-        '<div>'
-        '<h1>Offline Wallet Recovery Lab</h1>'
-        '<p>A modular, fully-offline recovery workstation for authorised '
-        'wallet owners and forensic recovery specialists.</p>'
-        '</div></div>',
+        f'<div class="cx-box"><div class="head">{_esc(header)}{live_html}</div><div class="body">',
         unsafe_allow_html=True,
     )
 
 
-# ---------------------------------------------------------------------------
-# Session state
-# ---------------------------------------------------------------------------
-
-# We keep ONLY public, exportable derivation results in our own keys.
-# Streamlit itself stores text-widget values under the widget's `key`; that is
-# unavoidable for any text input. The "Clear session" page wipes everything.
-RESULTS_KEY = "derived_addresses"
-NOTES_KEY = "recovery_notes"
-DISCLAIMER_KEY = "accepted_disclaimer"
+def close_box() -> None:
+    st.markdown("</div></div>", unsafe_allow_html=True)
 
 
-def _init_state() -> None:
-    if RESULTS_KEY not in st.session_state:
-        st.session_state[RESULTS_KEY] = []
-    if NOTES_KEY not in st.session_state:
-        st.session_state[NOTES_KEY] = ""
-    if DISCLAIMER_KEY not in st.session_state:
-        st.session_state[DISCLAIMER_KEY] = False
-
-
-def _clear_session() -> None:
-    for k in list(st.session_state.keys()):
-        del st.session_state[k]
-    _init_state()
-
-
-def _add_results(rows: list[dict]) -> None:
-    """De-duplicated append. Records contain only public fields."""
-    existing = {(r["path"], r["address"]) for r in st.session_state[RESULTS_KEY]}
-    for r in rows:
-        key = (r["path"], r["address"])
-        if key not in existing:
-            st.session_state[RESULTS_KEY].append(r)
-            existing.add(key)
-
-
-# ---------------------------------------------------------------------------
-# Small shared helpers
-# ---------------------------------------------------------------------------
-
-def _mnemonic_input(key: str, label: str = "BIP39 seed phrase") -> str:
-    """Standard mnemonic textbox. We never write the value to our own state."""
-    return st.text_area(
-        label,
-        height=100,
-        key=key,
-        placeholder="word1 word2 word3 ...  (12 / 15 / 18 / 21 / 24 words)",
-        help=(
-            "Processed in memory only. Never logged, saved, exported, or sent "
-            "over a network. Use the Clear Session page when you are done."
-        ),
-    )
-
-
-def _passphrase_input(key: str) -> str:
-    """Optional BIP39 passphrase. Treated as a secret - never persisted."""
-    return st.text_input(
-        "Optional BIP39 passphrase (the '25th word')",
-        type="password",
-        key=key,
-        help=(
-            "BIP39 passphrases mutate the seed: same mnemonic + different "
-            "passphrase = different wallet. Leave blank if you did not set one."
-        ),
-    )
-
-
-def _target_address_input(key: str) -> str:
-    """Known public address to match candidates against."""
-    return st.text_input(
-        "Known public address (optional)",
-        key=key,
-        placeholder="0x... (ETH) or bc1.../1.../3... (BTC)",
-        help="If you remember at least one address from this wallet, paste it "
-             "here to narrow recovery results down to the right derivation.",
-    )
-
-
-def _disclaimer_gate() -> bool:
-    if not st.session_state.get(DISCLAIMER_KEY, False):
-        st.warning(
-            "Read and accept the disclaimer on the **Home** page before using "
-            "any recovery workflow."
+def render_status_cards(cards, columns: int = 4) -> None:
+    """cards: list of tuples (label, value, variant, optional_descr)."""
+    cls = {2: "g2", 3: "g3"}.get(columns, "g4")
+    inner = ""
+    for c in cards:
+        label, value, variant = c[0], c[1], (c[2] if len(c) > 2 else "")
+        descr = c[3] if len(c) > 3 else ""
+        v_cls = f"sv {variant}" if variant else "sv"
+        descr_html = f'<div class="sd">{_esc(descr)}</div>' if descr else ""
+        inner += (
+            f'<div class="cx-sc"><div class="sl">{_esc(label)}</div>'
+            f'<div class="{v_cls}">{_esc(value)}</div>{descr_html}</div>'
         )
-        return False
-    return True
-
-
-def _ethical_banner() -> None:
-    st.markdown(
-        '<div class="owl-warn-banner">'
-        '<strong>ETHICAL USE ONLY.</strong> Use this tool exclusively on '
-        'wallets you own or are explicitly authorised in writing to recover. '
-        'Use against third-party wallets without authorisation is illegal '
-        'in most jurisdictions.'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-
-
-def _show_addresses_table(rows: list[dict]) -> None:
-    st.dataframe(
-        [
-            {
-                "Coin": r["coin"],
-                "Type": r["address_type"],
-                "Path": r["path"],
-                "Address": r["address"],
-            }
-            for r in rows
-        ],
-        use_container_width=True,
-        hide_index=True,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Page: Home / security landing
-# ---------------------------------------------------------------------------
-
-def page_home() -> None:
-    _brand_banner()
-    _ethical_banner()
-
-    st.subheader("What this is")
-    st.markdown(
-        """
-        A local recovery laboratory that bundles multiple offline recovery
-        engines behind a single guided UI:
-
-        - **BIP39 validator** - word count, wordlist, checksum.
-        - **Missing-word recovery** - fill in `?` placeholders, filter by checksum.
-        - **Typo correction** - Levenshtein-1 suggestions from the official wordlist.
-        - **Word-order recovery** - bounded permutation testing.
-        - **Passphrase tester** - try a candidate BIP39 passphrase locally.
-        - **Derivation path scanner** - BIP44 / BIP49 / BIP84 + arbitrary paths.
-        - **Known-address matcher** - find which derivation produced a given address.
-        - **Wallet file metadata inspector** - MetaMask vault structure, file ID
-          (metadata only - no decryption, no password trials).
-        - **Recovery report exporter** - TXT / CSV / PDF / QR (public data only).
-        """
-    )
-
-    st.subheader("Offline checklist")
-    st.markdown(
-        """
-        Before you paste any real mnemonic into this app:
-
-        1. **Disconnect** Wi-Fi, ethernet, and any tethered mobile data.
-        2. **Close** cloud sync agents (Dropbox, iCloud, OneDrive, Drive).
-        3. **Quit** other browsers and remove any clipboard manager.
-        4. **Optional but recommended:** run under `firejail --net=none ...` or
-           an equivalent network-namespace sandbox, so the Python process
-           cannot reach a network even if something tried.
-        5. After finishing, use **Clear Session** and reboot the machine.
-        """
-    )
-
-    st.subheader("What this tool does NOT do")
-    st.markdown(
-        """
-        - No internet, no APIs, no RPC, no telemetry, no auto-update.
-        - No balance checks (requires the network - intentionally out of scope).
-        - No password cracking / decryption attempts on encrypted vaults.
-        - No bulk attacks on unknown / third-party wallets.
-        - No persistence of seed phrases, private keys, raw seed bytes,
-          entropy, or passphrases. Anywhere. Ever.
-        """
-    )
-
-    st.divider()
-    accept = st.checkbox(
-        "I have read the above. I will run this tool offline. I will only use "
-        "it on wallets I own or am explicitly authorised to recover.",
-        value=st.session_state.get(DISCLAIMER_KEY, False),
-        key="_disclaimer_box",
-    )
-    st.session_state[DISCLAIMER_KEY] = accept
-    if not accept:
-        st.info("Tick the box to unlock the rest of the lab.")
-
-
-# ---------------------------------------------------------------------------
-# Page: Educational lab
-# ---------------------------------------------------------------------------
-
-def page_education() -> None:
-    _page_header("DOCS", "Educational lab")
-    st.caption(
-        "Beginner-friendly references covering wallet architecture and the "
-        "BIP standards this lab implements."
-    )
-
-    topic = st.selectbox(
-        "Topic",
-        [
-            "Wallet architecture (hot / cold / custodial)",
-            "Public vs private keys, hashing, ECC",
-            "BIP39 - seed phrases",
-            "BIP32 - HD wallets",
-            "BIP44 / BIP49 / BIP84 - derivation paths",
-            "Air-gapped recovery principles",
-            "Hardware wallet security",
-            "Scams, phishing, and red flags",
-        ],
-    )
-
-    if topic.startswith("Wallet architecture"):
-        st.markdown("""
-        ### Wallet architecture
-
-        A crypto wallet stores **keys**, not coins. Coins live on-chain; the
-        wallet just controls the addresses that can move them.
-
-        **Hot wallets** (MetaMask, Trust Wallet, Phantom) - software on an
-        internet-connected device. Convenient, but their private keys are
-        only as safe as the OS and browser they run on.
-
-        **Cold wallets** (Ledger, Trezor, air-gapped paper / steel backups)
-        - keys never touch an internet-connected device. Recovery from a
-        cold backup is exactly what this lab is designed for.
-
-        **Custodial** wallets (Coinbase, Binance accounts) - a third party
-        holds the keys. Recovery is a customer-service problem, not a
-        cryptographic one. This tool is not for you.
-
-        **Non-custodial** - you hold the keys, so you carry the recovery
-        burden. Rule of thumb: *"Not your keys, not your coins."*
-        """)
-    elif topic.startswith("Public vs private"):
-        st.markdown("""
-        ### Public / private keys, hashing, ECC
-
-        - **Private key:** a random 256-bit secret. Whoever holds it controls
-          the funds. Never share, never paste online.
-        - **Public key:** derived from the private key with elliptic-curve
-          multiplication on **secp256k1** (Bitcoin and Ethereum both use this
-          curve). Safe to share.
-        - **Address:** a hash of the public key, optionally encoded. Bitcoin
-          uses SHA-256 + RIPEMD-160; Ethereum uses Keccak-256.
-        - **Hashing:** one-way. You can verify a guess but you cannot reverse
-          a hash to recover the input. This is why a lost seed cannot be
-          "decrypted" - it can only be reconstructed.
-        """)
-    elif topic.startswith("BIP39"):
-        st.markdown("""
-        ### BIP39 - seed phrases
-
-        A BIP39 mnemonic is **entropy + checksum**, encoded as 12 / 15 / 18 /
-        21 / 24 words from a 2048-word English wordlist.
-
-        - 128 bits of entropy -> 12 words.
-        - 256 bits of entropy -> 24 words.
-        - The last bits of the last word are a SHA-256 checksum of the
-          entropy, which is why most random 12-word strings are not valid.
-
-        Optional **BIP39 passphrase** (the "25th word") mixes into the seed.
-        Same mnemonic + different passphrase = totally different wallet.
-        Passphrases must be remembered separately; losing the passphrase
-        means losing the wallet just like losing the mnemonic.
-        """)
-    elif topic.startswith("BIP32"):
-        st.markdown("""
-        ### BIP32 - HD wallets
-
-        A **hierarchical deterministic** wallet derives a tree of keys from
-        a single seed using `parent_key -> child_key` derivations. You can
-        compute every address you will ever need from one 12/24-word
-        backup, which is why losing a single BIP39 phrase can lose
-        millions of addresses' worth of coins.
-
-        Each level in the tree is either *normal* or *hardened* (denoted
-        with a `'`). Hardened derivation prevents a leaked extended public
-        key from being used to compute child private keys.
-        """)
-    elif topic.startswith("BIP44 / BIP49 / BIP84"):
-        st.markdown("""
-        ### Derivation paths
-
-        Standard structure: `m / purpose' / coin_type' / account' / change / address_index`
-
-        | Purpose | Address style                    | Path example                |
-        |--------:|----------------------------------|-----------------------------|
-        |    44'  | Legacy P2PKH (BTC) / EVM (ETH)   | `m/44'/0'/0'/0/0` (BTC)     |
-        |    49'  | SegWit (P2SH-P2WPKH)             | `m/49'/0'/0'/0/0`           |
-        |    84'  | Native SegWit (Bech32)           | `m/84'/0'/0'/0/0`           |
-
-        Ethereum uses purpose 44 with `coin_type = 60'`:
-        `m/44'/60'/0'/0/{index}`.
-
-        **Common recovery confusion:** legacy vs. SegWit vs. native SegWit
-        produce completely different addresses from the same mnemonic. If
-        your wallet "shows zero balance", the first thing to test is
-        whether you are looking at the wrong path family.
-        """)
-    elif topic.startswith("Air-gapped"):
-        st.markdown("""
-        ### Air-gapped recovery principles
-
-        - Use a machine that has **never** been used for normal browsing.
-        - Boot from a freshly-installed OS (a Linux live USB is a common
-          choice).
-        - Pull the network cable, disable Wi-Fi from BIOS if possible.
-        - Install dependencies on a *different* machine, then move the
-          project folder via USB.
-        - When done, **wipe** the machine (full disk encryption + reboot
-          is the minimum; physical destruction of the disk is the
-          paranoid option).
-        - Treat clipboards, swap files, and unallocated disk space as
-          potential leakage channels.
-        """)
-    elif topic.startswith("Hardware"):
-        st.markdown("""
-        ### Hardware wallet security
-
-        - Ledger / Trezor keep the private key inside a secure element and
-          only ever sign transactions internally. The host computer
-          receives signed bytes, not keys.
-        - **Always** record the seed on the supplied backup card during
-          initial setup. The device will never show it again.
-        - Verify firmware authenticity via the vendor's official channel
-          before initialising.
-        - Consider a BIP39 passphrase for an extra layer.
-        - For BIG holdings, look at multisig setups (e.g. Sparrow, Specter,
-          Casa).
-        """)
-    elif topic.startswith("Scams"):
-        st.markdown("""
-        ### Scams, phishing, and red flags
-
-        Things a legitimate tool will **never** ask you to do:
-
-        - Enter your seed phrase into a website.
-        - Send any test coins to a "verification" address.
-        - Install a "wallet recovery" browser extension.
-        - "Sync" your wallet with a remote server.
-
-        If a "recovery service" promises to brute-force a forgotten seed
-        for a percentage of recovered funds, assume it is a scam. Real
-        forensic recovery work uses tools like the one you are reading
-        right now: offline, on hardware **the wallet owner controls**.
-        """)
-
-
-# ---------------------------------------------------------------------------
-# Page: Recovery problem selector (the guided front-door)
-# ---------------------------------------------------------------------------
-
-PROBLEMS = {
-    "I have a seed but my wallet shows zero balance":            "zero_balance",
-    "I have missing seed words":                                  "missing_words",
-    "I have incorrect / misspelled seed words":                  "typos",
-    "I think my word order is wrong":                            "wrong_order",
-    "I may have used a BIP39 passphrase":                         "passphrase",
-    "I have a corrupted backup (guided reconstruction)":         "corrupted",
-    "I want to inspect a wallet file or MetaMask vault":         "vault",
-}
-
-
-def page_problem_selector() -> None:
-    _page_header("WORKFLOW", "Recovery workflow")
-    if not _disclaimer_gate():
-        return
-    _ethical_banner()
-
-    st.markdown("**What problem are you trying to solve?**")
-    chosen = st.radio(
-        "Problem type",
-        list(PROBLEMS.keys()),
-        label_visibility="collapsed",
-        key="_problem_radio",
-    )
-    st.divider()
-    workflow = PROBLEMS[chosen]
-    if workflow == "zero_balance":
-        wf_zero_balance()
-    elif workflow == "missing_words":
-        wf_missing_words()
-    elif workflow == "typos":
-        wf_typos()
-    elif workflow == "wrong_order":
-        wf_wrong_order()
-    elif workflow == "passphrase":
-        wf_passphrase()
-    elif workflow == "corrupted":
-        wf_corrupted()
-    elif workflow == "vault":
-        wf_vault()
-
-
-# --- workflow: zero balance --------------------------------------------------
-
-def wf_zero_balance() -> None:
-    st.subheader("Wallet shows zero balance after recovery")
-    st.markdown(
-        "Most 'zero-balance' cases are actually **wrong derivation path** "
-        "or **wrong wallet software**. This workflow scans every standard "
-        "path family for the first N addresses and (optionally) tries to "
-        "match a known public address you remember."
-    )
-
-    mnemonic = _mnemonic_input(key="zb_mnemonic")
-    target = _target_address_input(key="zb_target")
-    count = st.number_input(
-        "Addresses per standard to scan", 1, MAX_ADDRESSES_PER_REQUEST, 5, key="zb_count"
-    )
-
-    if st.button("Run scan", type="primary", key="zb_btn"):
-        if not mnemonic.strip():
-            st.error("Please enter a mnemonic.")
-            return
-        try:
-            if target.strip():
-                result = find_address_match(
-                    mnemonic, target.strip(),
-                    max_addresses_per_standard=int(count),
-                )
-                if result["match"]:
-                    st.success(
-                        f"Match found at **{result['match']['path']}** "
-                        f"({result['match']['address_type']})."
-                    )
-                else:
-                    st.warning(
-                        f"No match in {result['searched']} candidates. Try a "
-                        "larger scan range, double-check the address you "
-                        "pasted, or check if a passphrase was used."
-                    )
-                rows = result["candidates"]
-            else:
-                rows = compare_all_standards(mnemonic, count=int(count))
-        except ValueError as e:
-            st.error(str(e))
-            return
-
-        _add_results(rows)
-        _show_addresses_table(rows)
-
-
-# --- workflow: missing words -------------------------------------------------
-
-def wf_missing_words() -> None:
-    st.subheader("Recover missing seed words")
-    st.markdown(
-        f"Use `?` for each unknown word. The engine tries every word from "
-        f"the official BIP39 wordlist in each slot and keeps only the "
-        f"checksum-valid candidates. **Hard cap: {MAX_MISSING_WORDS} unknown "
-        f"slots** (with 2 missing words there can be up to ~4.2 million "
-        f"trials, which already takes a noticeable amount of time)."
-    )
-
-    masked = _mnemonic_input(
-        key="mw_masked",
-        label="Mnemonic with `?` for unknown words",
-    )
-    target = _target_address_input(key="mw_target")
-    max_unk = st.slider("Max unknowns to allow", 1, MAX_MISSING_WORDS, 1, key="mw_max")
-
-    if st.button("Recover", type="primary", key="mw_btn"):
-        if not masked.strip():
-            st.error("Please enter a masked mnemonic.")
-            return
-        try:
-            with st.spinner("Searching the BIP39 wordlist..."):
-                res = recover_missing_words(
-                    masked,
-                    target_address=target.strip() or None,
-                    max_unknowns=int(max_unk),
-                )
-        except ValueError as e:
-            st.error(str(e))
-            return
-
-        st.success(
-            f"Checked **{res['checked']:,}** combinations. "
-            f"Found **{len(res['candidates'])}** valid candidate(s)"
-            + ("" if not res.get("truncated") else " (list truncated to 100).")
-        )
-        if res["candidates"]:
-            st.warning(
-                "Candidate mnemonics are shown below. **Write the correct "
-                "one down on paper, then use Clear Session.** They are NOT "
-                "exported to reports."
-            )
-            for i, cand in enumerate(res["candidates"], 1):
-                st.code(cand, language="text")
-
-
-# --- workflow: typos ---------------------------------------------------------
-
-def wf_typos() -> None:
-    st.subheader("Typo correction")
-    st.markdown(
-        "For each word that is not in the official BIP39 English wordlist, "
-        "the lab suggests the closest valid words by Levenshtein distance. "
-        "After picking corrections, you can re-validate the mnemonic."
-    )
-    mnemonic = _mnemonic_input(key="ty_mnemonic")
-    n_sugg = st.slider("Suggestions per unknown word", 1, 10, 5, key="ty_n")
-
-    if st.button("Suggest corrections", type="primary", key="ty_btn"):
-        if not mnemonic.strip():
-            st.error("Please enter a mnemonic.")
-            return
-        res = suggest_typo_corrections(mnemonic, max_suggestions=int(n_sugg))
-        if res["all_words_known"]:
-            st.success("Every word is already in the BIP39 wordlist.")
-            info = validate_mnemonic(mnemonic)
-            st.write({k: v for k, v in info.items()})
-            return
-        for entry in res["unknown_words"]:
-            st.markdown(
-                f"- **Position {entry['position'] + 1}**: unknown word "
-                f"`{entry['word']}` -> suggestions: "
-                f"`{', '.join(entry['suggestions'])}`"
-            )
-
-
-# --- workflow: wrong word order ---------------------------------------------
-
-def wf_wrong_order() -> None:
-    st.subheader("Word-order recovery")
-    st.markdown(
-        f"For when **all the words are correct but the order is uncertain**. "
-        f"Capped at **{MAX_ORDER_POSITIONS}** positions ({MAX_ORDER_POSITIONS}! "
-        f"= 40,320 permutations is the absolute ceiling). If you have a known "
-        f"address, paste it - it will narrow the candidate list to the right "
-        f"order."
-    )
-    raw = st.text_area(
-        f"Up to {MAX_ORDER_POSITIONS} BIP39 words (space-separated)",
-        key="wo_raw",
-        height=80,
-    )
-    target = _target_address_input(key="wo_target")
-
-    if st.button("Search permutations", type="primary", key="wo_btn"):
-        words = raw.lower().split()
-        if not words:
-            st.error("Please enter the words.")
-            return
-        try:
-            with st.spinner("Trying permutations..."):
-                res = recover_word_order(
-                    words,
-                    target_address=target.strip() or None,
-                    max_positions=MAX_ORDER_POSITIONS,
-                )
-        except ValueError as e:
-            st.error(str(e))
-            return
-        st.success(
-            f"Checked **{res['checked']:,}** permutations. Found "
-            f"**{len(res['candidates'])}** valid candidate(s)."
-        )
-        for cand in res["candidates"]:
-            st.code(cand, language="text")
-
-
-# --- workflow: passphrase ----------------------------------------------------
-
-def wf_passphrase() -> None:
-    st.subheader("BIP39 passphrase tester")
-    st.markdown(
-        "If you may have set a BIP39 passphrase (the 25th word), the same "
-        "mnemonic will produce **different** addresses depending on it. "
-        "Paste the mnemonic and a candidate passphrase; the lab will derive "
-        "the first few addresses across every standard path. Compare them "
-        "to one you remember to confirm. **Passphrases are not saved.**"
-    )
-    mnemonic = _mnemonic_input(key="pp_mnemonic")
-    passphrase = _passphrase_input(key="pp_passphrase")
-    target = _target_address_input(key="pp_target")
-    count = st.slider("Addresses per standard", 1, 20, 5, key="pp_count")
-
-    if st.button("Derive with passphrase", type="primary", key="pp_btn"):
-        if not mnemonic.strip():
-            st.error("Please enter a mnemonic.")
-            return
-        try:
-            res = test_passphrase(
-                mnemonic, passphrase,
-                target_address=target.strip() or None,
-                count=int(count),
-            )
-        except ValueError as e:
-            st.error(str(e))
-            return
-        if res.get("match"):
-            st.success(
-                f"Match at **{res['match']['path']}** "
-                f"({res['match']['address_type']}) - this passphrase looks "
-                "correct."
-            )
+    st.markdown(f'<div class="cx-cards {cls}">{inner}</div>', unsafe_allow_html=True)
+
+
+def log_event(kind: str, text: str) -> None:
+    if "activity_log" not in st.session_state:
+        st.session_state["activity_log"] = []
+    ts = datetime.now().strftime("%H:%M:%S")
+    st.session_state["activity_log"].append({"ts": ts, "kind": kind, "text": text})
+    st.session_state["activity_log"] = st.session_state["activity_log"][-200:]
+
+
+def render_terminal(title: str = "session :: cryptex", max_lines: int = 40) -> None:
+    log = st.session_state.get("activity_log", [])
+    rows = ""
+    for entry in log[-max_lines:]:
+        kind = entry.get("kind", "info")
+        text = _esc(entry.get("text", ""))
+        ts = _esc(entry.get("ts", ""))
+        if kind == "cmd":
+            row = f'<span class="tl"><span class="c-ok">$ </span><span class="c-cmd">{text}</span></span>'
+        elif kind == "ok":
+            row = f'<span class="tl"><span class="c-ok">[{ts}] &#10004; {text}</span></span>'
+        elif kind == "warn":
+            row = f'<span class="tl"><span class="c-warn">[{ts}] &#9888; {text}</span></span>'
+        elif kind == "err":
+            row = f'<span class="tl"><span class="c-err">[{ts}] &#10007; {text}</span></span>'
         else:
-            st.info(
-                "No match against the target address (or no target given). "
-                "Compare the derived addresses below to one you remember."
-            )
-        _add_results(res["addresses"])
-        _show_addresses_table(res["addresses"])
-
-
-# --- workflow: corrupted backup ---------------------------------------------
-
-def wf_corrupted() -> None:
-    st.subheader("Corrupted-backup guided reconstruction")
-    st.markdown(
-        "Use this as a checklist. As you reconstruct each word, record it "
-        "in the notes field and re-validate. When all words look right but "
-        "the checksum still fails, try the **Word-order recovery** workflow."
-    )
-    st.markdown(
-        """
-        **Checklist:**
-
-        1. Photograph or write down whatever IS readable, exactly as it is.
-        2. For each illegible word, note 1-3 plausible interpretations.
-        3. Run **Typo correction** on each guess - the wordlist is small
-           and most "looks like X" errors snap to a single neighbour.
-        4. If exactly 1 or 2 words remain unknown, use **Missing-word
-           recovery** with `?` placeholders.
-        5. If all words look readable but the checksum fails, try
-           **Word-order recovery** - some backups list the words in a
-           grid that can be read top-down vs. left-right.
-        6. If you have a known public address from this wallet, paste it
-           into any workflow above to narrow the answer to one candidate.
-        """
-    )
-    st.text_area(
-        "Reconstruction notes (kept locally in this session only)",
-        key=NOTES_KEY,
-        height=160,
-        help="Whatever you type here is included in the recovery report. "
-             "**Do not write the actual seed phrase into this field** - the "
-             "report is designed to never contain secrets.",
-    )
-
-
-# --- workflow: vault inspection ---------------------------------------------
-
-def wf_vault() -> None:
-    st.subheader("Wallet file metadata inspector")
-    st.markdown(
-        "Parses MetaMask vault JSON and identifies common wallet file "
-        "formats. **Metadata only:** no decryption, no password trial, no "
-        "private keys are extracted. Use this to confirm a backup file is "
-        "of the kind you think it is."
-    )
-
-    tab1, tab2 = st.tabs(["MetaMask vault JSON", "Identify any wallet file"])
-
-    with tab1:
-        vault = st.text_area(
-            "Paste the vault JSON (raw or wrapped)",
-            key="vault_text",
-            height=180,
-            placeholder='{"data": "...", "iv": "...", "salt": "...", '
-                         '"keyMetadata": {"algorithm": "PBKDF2", "params": '
-                         '{"iterations": 600000}}}',
-        )
-        if st.button("Inspect vault", type="primary", key="vault_btn"):
-            if not vault.strip():
-                st.error("Paste the vault JSON above.")
-            else:
-                try:
-                    res = inspect_metamask_vault(vault)
-                    st.json(res)
-                except ValueError as e:
-                    st.error(str(e))
-
-    with tab2:
-        f = st.file_uploader(
-            "Wallet file (any format)",
-            key="vault_upload",
-            help="The file is read in memory only. It is not copied anywhere.",
-        )
-        if f is not None:
-            data = f.read()
-            try:
-                res = identify_wallet_file(data, filename=f.name)
-                st.json(res)
-                if res.get("contains_secrets_warning"):
-                    st.error(
-                        "This file type typically holds RAW secrets. "
-                        "Treat the original file with great care; do not "
-                        "share it, do not upload it anywhere."
-                    )
-            except Exception as e:
-                st.error(f"Could not parse file: {e}")
-
-
-# ---------------------------------------------------------------------------
-# Page: Tools (direct-access power-user panels)
-# ---------------------------------------------------------------------------
-
-def page_tools() -> None:
-    _page_header("DIRECT ACCESS", "Tools")
-    if not _disclaimer_gate():
-        return
-    tab1, tab2, tab3 = st.tabs(["BIP39 validator", "Address generator", "Arbitrary path"])
-
-    with tab1:
-        m = _mnemonic_input(key="tool_validate_m")
-        if st.button("Validate", key="tool_validate_btn"):
-            if not m.strip():
-                st.error("Please enter a mnemonic.")
-            else:
-                r = validate_mnemonic(m)
-                c1, c2 = st.columns(2)
-                c1.metric("Word count", r["word_count"])
-                c2.metric("Overall", "Valid" if r["valid"] else "Invalid")
-                for label, ok in [
-                    ("Word count is 12 / 15 / 18 / 21 / 24", r["word_count_valid"]),
-                    ("All words are in the BIP39 English wordlist", r["words_in_wordlist"]),
-                    ("Checksum verifies", r["checksum_valid"]),
-                ]:
-                    (st.success if ok else st.error)(
-                        f"{'OK' if ok else 'FAIL'} - {label}"
-                    )
-
-    with tab2:
-        m = _mnemonic_input(key="tool_gen_m")
-        coin = st.radio("Coin", ["ETH", "BTC"], horizontal=True, key="tool_gen_coin")
-        btc_type = None
-        if coin == "BTC":
-            btc_type = st.selectbox(
-                "Bitcoin address type",
-                list(BTC_ADDRESS_TYPES.keys()),
-                format_func=lambda k: BTC_ADDRESS_TYPES[k]["label"],
-                index=2,
-                key="tool_gen_btc_type",
-            )
-        count = st.slider("Number of addresses", 1, MAX_ADDRESSES_PER_REQUEST, 5,
-                          key="tool_gen_count")
-        if st.button("Generate", type="primary", key="tool_gen_btn"):
-            if not m.strip():
-                st.error("Please enter a mnemonic.")
-            else:
-                try:
-                    if coin == "ETH":
-                        rows = derive_eth_addresses(m, int(count))
-                    else:
-                        rows = derive_btc_addresses(m, btc_type, int(count))
-                    _add_results(rows)
-                    _show_addresses_table(rows)
-                except ValueError as e:
-                    st.error(str(e))
-
-    with tab3:
-        st.markdown(
-            "Derive a single address at an arbitrary BIP32 path. Useful for "
-            "non-standard wallets (Electrum, Exodus quirks, custom paths)."
-        )
-        m = _mnemonic_input(key="tool_arb_m")
-        path = st.text_input("BIP32 path", "m/44'/60'/0'/0/0", key="tool_arb_path")
-        coin = st.radio("Coin", ["ETH", "BTC"], horizontal=True, key="tool_arb_coin")
-        btc_type = "native_segwit"
-        if coin == "BTC":
-            btc_type = st.selectbox(
-                "Bitcoin address type",
-                list(BTC_ADDRESS_TYPES.keys()),
-                format_func=lambda k: BTC_ADDRESS_TYPES[k]["label"],
-                index=2,
-                key="tool_arb_btc_type",
-            )
-        if st.button("Derive single address", type="primary", key="tool_arb_btn"):
-            if not m.strip():
-                st.error("Please enter a mnemonic.")
-            else:
-                try:
-                    row = derive_arbitrary_path(m, path, coin, btc_type)
-                    _add_results([row])
-                    _show_addresses_table([row])
-                except ValueError as e:
-                    st.error(str(e))
-
-
-# ---------------------------------------------------------------------------
-# Page: Recovery report
-# ---------------------------------------------------------------------------
-
-def page_report() -> None:
-    _page_header("EXPORT", "Recovery report")
-    if not _disclaimer_gate():
-        return
-
-    rows = st.session_state.get(RESULTS_KEY, [])
+            row = f'<span class="tl"><span class="c-dim">[{ts}]</span> <span class="c-info">{text}</span></span>'
+        rows += row
     if not rows:
-        st.info("No addresses generated yet. Run a recovery workflow first.")
-        return
+        rows = '<span class="tl"><span class="c-ok">&#10004;</span> <span class="c-dim">CRYPTEX session ready. Awaiting commands.</span></span>'
+    html_block = f"""
+    <div class="cx-term">
+      <div class="tb">
+        <div class="td" style="background:#ff5f57"></div>
+        <div class="td" style="background:#febc2e"></div>
+        <div class="td" style="background:#28c840"></div>
+        <span class="tt">{_esc(title)}</span>
+      </div>
+      <div class="to">{rows}</div>
+    </div>
+    """
+    st.markdown(html_block, unsafe_allow_html=True)
 
-    st.markdown(
-        f"**{len(rows)}** public address(es) derived in this session. "
-        "Reports include only the timestamp, derivation paths, address types, "
-        "and public addresses. Seeds, private keys, raw seed bytes, entropy, "
-        "and passphrases are **never** written to disk."
-    )
-    _show_addresses_table(rows)
 
-    st.text_area(
-        "Recovery notes (free text - included in the report)",
-        key=NOTES_KEY,
-        height=120,
-        help="Do not paste your seed phrase here. The report sanitiser does "
-             "not inspect free-text notes.",
-    )
-    notes = st.session_state.get(NOTES_KEY, "")
+def render_rblock(rows) -> None:
+    """rows: list of (label, value, color_cls). color_cls in: rk/rv/ra/ro/rr."""
+    body = ""
+    for r in rows:
+        label, value = r[0], r[1]
+        cls = r[2] if len(r) > 2 else "ra"
+        body += f'<div><span class="rk">{_esc(label)}:</span> <span class="{cls}">{_esc(value)}</span></div>'
+    st.markdown(f'<div class="cx-rblock">{body}</div>', unsafe_allow_html=True)
 
-    txt = build_txt_report(rows, notes=notes)
-    csv = build_csv_report(rows, notes=notes)
-    try:
-        pdf = build_pdf_report(rows, notes=notes)
-    except Exception as e:
-        pdf = None
-        st.error(f"PDF generation failed: {e}")
 
-    c1, c2, c3 = st.columns(3)
-    c1.download_button(
-        "Download TXT", data=txt,
-        file_name="wallet_recovery_report.txt", mime="text/plain",
-    )
-    c2.download_button(
-        "Download CSV", data=csv,
-        file_name="wallet_recovery_report.csv", mime="text/csv",
-    )
-    if pdf is not None:
-        c3.download_button(
-            "Download PDF", data=pdf,
-            file_name="wallet_recovery_report.pdf", mime="application/pdf",
+def render_data_table(headers, rows) -> None:
+    head = "".join(f"<th>{_esc(h)}</th>" for h in headers)
+    body = ""
+    for row in rows:
+        cells = "".join(f"<td>{c if isinstance(c, str) and c.startswith('<span') else _esc(c)}</td>" for c in row)
+        body += f"<tr>{cells}</tr>"
+    st.markdown(f'<table class="cx-dt"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>', unsafe_allow_html=True)
+
+
+def render_active_case_banner() -> None:
+    active = get_active_case()
+    if active:
+        st.markdown(
+            f'<div class="cx-banner">'
+            f'<div class="pulse"></div>'
+            f'<span class="label">ACTIVE CASE:</span><span class="val">{_esc(active["id"])} &middot; {_esc(active["name"])}</span>'
+            f'<span class="label">INVESTIGATOR:</span><span class="val">{_esc(active["investigator"] or "n/a")}</span>'
+            f'<span class="label">CHAIN:</span><span class="val">{_esc(active["chain"])}</span>'
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<div class="cx-banner muted">'
+            '<span class="label">NO ACTIVE CASE</span>'
+            '<span>&middot; Open one in CASE MANAGEMENT to enable evidence logging</span>'
+            "</div>",
+            unsafe_allow_html=True,
         )
 
-    st.divider()
-    st.subheader("QR code for a single public address")
-    addr_options = [r["address"] for r in rows]
-    target = st.selectbox(
-        "Pick an address", addr_options, key="qr_pick",
-    )
-    if target:
-        try:
-            png = build_qr_png(target)
-            st.image(png, caption=target, width=240)
-            st.download_button(
-                "Download QR (PNG)", data=png,
-                file_name=f"address_{target[:10]}.png",
-                mime="image/png",
+
+# ---------------------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------------------
+
+NAV_GROUPS_OFFLINE = [
+    ("CORE", [PAGE_SECURITY_LANDING, PAGE_CASE_MGMT, PAGE_EVIDENCE_HASH]),
+    ("RECOVERY TOOLS", [
+        PAGE_RECOVERY_SELECTOR,
+        PAGE_INCOMPLETE_SEED,
+        PAGE_TYPO_LAB,
+        PAGE_WRONG_ORDER,
+        PAGE_PASSPHRASE,
+    ]),
+    ("FORENSICS", [
+        PAGE_BIP39_VALIDATION,
+        PAGE_ENTROPY,
+        PAGE_VAULT_INSPECT,
+        PAGE_DERIVATION,
+        PAGE_ADDRESS_MATCHER,
+        PAGE_ADDRESS_GEN,
+    ]),
+    ("UTILITIES", [
+        PAGE_HASH_TOOLS,
+        PAGE_EXPORTER,
+        PAGE_AIRGAP_GUIDE,
+        PAGE_EDUCATION,
+        PAGE_WIPE,
+    ]),
+]
+
+NAV_GROUPS_LIVE = [
+    ("CORE", [PAGE_SECURITY_LANDING, PAGE_CASE_MGMT, PAGE_EVIDENCE_HASH]),
+    ("LIVE TOOLS", [PAGE_LIVE_ADDR, PAGE_LIVE_TX]),
+    ("UTILITIES", [
+        PAGE_HASH_TOOLS,
+        PAGE_EXPORTER,
+        PAGE_AIRGAP_GUIDE,
+        PAGE_EDUCATION,
+        PAGE_WIPE,
+    ]),
+]
+
+
+def render_sidebar() -> str:
+    with st.sidebar:
+        st.markdown(
+            '<div class="cx-sb-logo">CRYPT<em>EX</em></div>'
+            '<div class="cx-sb-sub">FORENSIC WORKSTATION v3</div>',
+            unsafe_allow_html=True,
+        )
+
+        mode = get_current_mode()
+        if mode == OFFLINE_SAFE:
+            st.markdown('<div class="cx-mode off">&#9679; OFFLINE SAFE</div>', unsafe_allow_html=True)
+            st.markdown('<div class="btn-red">', unsafe_allow_html=True)
+            if st.button("ENGAGE LIVE ANALYSIS", key="mode_to_live", use_container_width=True):
+                set_mode(LIVE_ANALYSIS)
+                log_event("warn", "Switched to LIVE ANALYSIS mode")
+                st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+            groups = NAV_GROUPS_OFFLINE
+        else:
+            st.markdown('<div class="cx-mode live">&#9679; LIVE ANALYSIS</div>', unsafe_allow_html=True)
+            st.markdown('<div class="btn-green">', unsafe_allow_html=True)
+            if st.button("RETURN TO OFFLINE SAFE", key="mode_to_offline", use_container_width=True):
+                set_mode(OFFLINE_SAFE)
+                log_event("ok", "Returned to OFFLINE SAFE mode")
+                st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+            groups = NAV_GROUPS_LIVE
+
+        # Flatten options, labelled with icons; keep mapping from label to page id.
+        labelled = []
+        label_to_page = {}
+        for group_name, pages in groups:
+            st.markdown(f'<div class="cx-ns">{group_name}</div>', unsafe_allow_html=True)
+            options_in_group = []
+            for p in pages:
+                icon = PAGE_ICONS.get(p, "")
+                label = f"{icon}  {p}"
+                labelled.append(label)
+                label_to_page[label] = p
+                options_in_group.append(label)
+            # Use a small radio per group so labels group cleanly.
+            current = st.session_state.get("current_page", PAGE_SECURITY_LANDING)
+            current_label = next((lbl for lbl, p in label_to_page.items() if p == current and lbl in options_in_group), None)
+            idx = options_in_group.index(current_label) if current_label else 0
+            chosen = st.radio(
+                group_name,
+                options_in_group,
+                index=idx if current_label else None,
+                key=f"nav_{group_name}",
+                label_visibility="collapsed",
             )
-        except Exception as e:
-            st.error(f"QR generation failed: {e}")
+            if chosen and chosen != current_label and label_to_page[chosen] != current:
+                st.session_state["current_page"] = label_to_page[chosen]
 
-    with st.expander("Preview TXT report"):
-        st.code(txt, language="text")
+        st.markdown('<div class="cx-ns" style="margin-top:14px">SESSION</div>', unsafe_allow_html=True)
+        st.caption(f"Build 2026.05 / pid {id(st.session_state) % 99999}")
+
+        return st.session_state.get("current_page", PAGE_SECURITY_LANDING)
 
 
 # ---------------------------------------------------------------------------
-# Page: Clear session
+# Pages
 # ---------------------------------------------------------------------------
 
-def page_clear() -> None:
-    _page_header("SESSION", "Clear session")
+def _btn(label: str, *, key: str, variant: str = "cyan", use_container_width: bool = False) -> bool:
+    """Render a colored streamlit button via a wrapper div."""
+    cls_map = {
+        "cyan": "",
+        "green": "btn-green",
+        "orange": "btn-orange",
+        "red": "btn-red",
+        "purple": "btn-purple",
+    }
+    cls = cls_map.get(variant, "")
+    if cls:
+        st.markdown(f'<div class="{cls}">', unsafe_allow_html=True)
+    clicked = st.button(label, key=key, use_container_width=use_container_width)
+    if cls:
+        st.markdown("</div>", unsafe_allow_html=True)
+    return clicked
+
+
+def page_security_landing():
+    render_section_header("\U0001F6E1", "SECURITY LANDING", "PROTOCOL OVERVIEW")
+    mode = get_current_mode()
+    cases = get_all_cases()
+    evidence_count = sum(len(c.get("evidence", [])) for c in cases)
+    started_at = st.session_state.get("_session_started_at")
+    if started_at is None:
+        started_at = datetime.now(timezone.utc)
+        st.session_state["_session_started_at"] = started_at
+    session_age = datetime.now(timezone.utc) - started_at
+    mins, secs = divmod(int(session_age.total_seconds()), 60)
+    hrs, mins = divmod(mins, 60)
+    age_str = f"{hrs:02d}:{mins:02d}:{secs:02d}"
+
+    render_status_cards([
+        ("CURRENT MODE", "OFFLINE" if mode == OFFLINE_SAFE else "LIVE", "green" if mode == OFFLINE_SAFE else "red", "operational"),
+        ("ACTIVE CASES", str(len(cases)), "" if cases else "orange", "in registry"),
+        ("EVIDENCE LOGGED", str(evidence_count), "green" if evidence_count else "", "hash entries"),
+        ("SESSION AGE", age_str, "", "since boot"),
+    ])
+
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        open_box("OPERATIONAL PROTOCOL")
+        st.markdown(
+            """
+- Verify the machine is **air-gapped** before entering OFFLINE SAFE work.
+- Disable Wi-Fi, Bluetooth, and any LAN interface at the OS level.
+- No external storage attached unless it has been independently hashed.
+- Sensitive seeds, keys, and passphrases stay in volatile session state only.
+- Every export goes through a whitelist; secrets cannot leak by export.
+            """
+        )
+        close_box()
+
+        open_box("DUAL-MODE ARCHITECTURE")
+        st.markdown(
+            """
+**OFFLINE SAFE** - default mode. All recovery, derivation, hashing,
+entropy, and forensic features run locally. No network sockets are opened.
+The `live_utils` import is permitted but its functions are guarded by
+`@require_live` and will refuse to run.
+
+**LIVE ANALYSIS** - opt-in. Blockchain lookups against public APIs
+(Blockstream, mempool.space, Etherscan public endpoint) are enabled.
+All sensitive recovery pages are hidden from the sidebar until you
+return to OFFLINE SAFE.
+            """
+        )
+        close_box()
+    with col2:
+        render_terminal("security-landing :: cryptex")
+        open_box("AIRGAP CHECKLIST")
+        st.markdown(
+            """
+- [x] Run venv installed offline
+- [x] Backend modules import nothing live
+- [x] Reports whitelist public fields only
+- [ ] Confirm host has no network route
+- [ ] Verify clipboard manager is disabled
+            """
+        )
+        close_box()
+
+    log_event("info", "Viewed SECURITY LANDING")
+
+
+def page_case_mgmt():
+    render_section_header("\U0001F4C1", "CASE MANAGEMENT", "REAL SHA256 CUSTODY HASHING")
+    cases = get_all_cases()
+    active = get_active_case()
+    open_count = len(cases)
+    evidence_total = sum(len(c.get("evidence", [])) for c in cases)
+    render_status_cards([
+        ("CASES IN REGISTRY", str(open_count), "" if open_count else "orange"),
+        ("EVIDENCE ATTACHED", str(evidence_total), "green" if evidence_total else ""),
+        ("ACTIVE CASE", active["id"] if active else "NONE", "green" if active else "orange"),
+        ("MODE", "OFFLINE" if is_offline() else "LIVE", "green" if is_offline() else "red"),
+    ])
+
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        open_box("NEW CASE INTAKE")
+        with st.form("new_case_form", clear_on_submit=True):
+            r1c1, r1c2 = st.columns(2)
+            with r1c1:
+                pri = st.selectbox("PRIORITY", ["CRITICAL", "HIGH", "MEDIUM", "LOW"])
+            with r1c2:
+                chain = st.selectbox("CHAIN", ["Bitcoin", "Ethereum", "Multi-Chain", "Solana", "Monero", "Other"])
+            inc_type = st.selectbox(
+                "INCIDENT TYPE",
+                ["Lost Seed Phrase", "Exchange Hack", "Rugpull Trace", "HW Wallet Failure",
+                 "DeFi Exploit", "Ransomware", "Smart Contract Exploit", "Other"],
+            )
+            r2c1, r2c2 = st.columns(2)
+            with r2c1:
+                asset = st.text_input("ASSET", placeholder="BTC / ETH...")
+            with r2c2:
+                value = st.text_input("VALUE (USD)", placeholder="250000")
+            lead = st.text_input("LEAD ANALYST", placeholder="Name / Badge / Firm")
+            case_name = st.text_input("CASE DESIGNATION", placeholder="Target wallet / incident handle")
+            notes = st.text_area("NOTES", placeholder="Describe incident details...")
+            submitted = st.form_submit_button("CREATE CASE")
+            if submitted:
+                try:
+                    desc_lines = [
+                        f"Priority: {pri}",
+                        f"Incident: {inc_type}",
+                        f"Asset: {asset}",
+                        f"Value (USD): {value}",
+                        notes,
+                    ]
+                    cid = create_case(
+                        case_name=case_name or f"{inc_type} - {chain}",
+                        investigator=lead or "Unassigned",
+                        chain=chain,
+                        description="\n".join(s for s in desc_lines if s),
+                    )
+                    log_event("ok", f"Created case {cid}")
+                    st.success(f"Case {cid} created and set active.")
+                    st.rerun()
+                except ValueError as e:
+                    log_event("err", f"Case create failed: {e}")
+                    st.error(str(e))
+        close_box()
+    with col2:
+        render_terminal("case-mgmt :: registry")
+        open_box("ACTIVE CASE")
+        if active:
+            render_rblock([
+                ("ID", active["id"], "ra"),
+                ("NAME", active["name"], "rv"),
+                ("INVESTIGATOR", active["investigator"], "rv"),
+                ("CHAIN", active["chain"], "ra"),
+                ("CREATED", active["created_at"], "rk"),
+                ("EVIDENCE", str(len(active.get("evidence", []))), "rv"),
+            ])
+        else:
+            st.markdown('<div class="cx-rblock"><span class="rk">No active case selected.</span></div>', unsafe_allow_html=True)
+        close_box()
+
+    open_box(f"ACTIVE CASE REGISTRY ({len(cases)} cases)")
+    if not cases:
+        st.markdown('<div class="cx-rblock"><span class="rk">Registry empty. Create a case above.</span></div>', unsafe_allow_html=True)
+    else:
+        headers = ["ID", "NAME", "CHAIN", "LEAD", "EVIDENCE", "CREATED", "ACTIVE"]
+        rows = []
+        for c in cases:
+            active_tag = '<span class="cx-tag green">ACTIVE</span>' if active and active["id"] == c["id"] else ""
+            rows.append([
+                c["id"],
+                c["name"],
+                c["chain"],
+                c["investigator"],
+                str(len(c.get("evidence", []))),
+                c["created_at"].split("T")[0],
+                active_tag,
+            ])
+        render_data_table(headers, rows)
+
+        st.markdown("##### Activate a case")
+        cols = st.columns(min(4, max(1, len(cases))))
+        for idx, c in enumerate(cases):
+            with cols[idx % len(cols)]:
+                if st.button(f"▶ {c['id']}", key=f"activate_{c['id']}"):
+                    set_active_case(c["id"])
+                    log_event("ok", f"Activated case {c['id']}")
+                    st.rerun()
+    close_box()
+
+
+def page_evidence_hash():
+    render_section_header("\U0001F9EC", "EVIDENCE HASH CHECKER", "REAL SHA256 / SHA512 / MD5")
+    active = get_active_case()
+    if not active:
+        st.warning("No active case. Hashes will be computed but not attached. Open a case under CASE MANAGEMENT first.")
+
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        open_box("UPLOAD EVIDENCE FILE")
+        st.markdown(
+            '<div style="border:2px dashed #0a3050;padding:14px;text-align:center;'
+            'font-family:\'Share Tech Mono\',monospace;color:#4a7a9b;font-size:11px;'
+            'margin-bottom:8px">'
+            '&#128206; Drop a file below for offline hashing. The file never leaves this machine.'
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        uploaded = st.file_uploader("Select evidence file", accept_multiple_files=False, key="evidence_file_upload")
+        notes = st.text_input("EVIDENCE DESCRIPTION / SOURCE", key="evidence_notes")
+        if uploaded is not None:
+            data = uploaded.getvalue()
+            hashes = calculate_evidence_hash(data)
+            render_rblock([
+                ("FILE", uploaded.name, "rv"),
+                ("SIZE", f"{hashes['size_bytes']} bytes", "ra"),
+                ("MD5", hashes["md5"], "ro"),
+                ("SHA-1", hashes["sha1"], "ro"),
+                ("SHA-256", hashes["sha256"], "rv"),
+                ("SHA-512", calculate_sha512(data), "rk"),
+            ])
+            # Fingerprint extras
+            try:
+                info = identify_wallet_file(data, uploaded.name)
+                render_rblock([
+                    ("FORMAT", info["guessed_format"], "ra"),
+                    ("LABEL", info["label"], "rv"),
+                    ("CONTAINS SECRETS?", "YES - HANDLE CAREFULLY" if info["contains_secrets_warning"] else "no", "rr" if info["contains_secrets_warning"] else "rk"),
+                    ("NOTES", "; ".join(info["notes"]) or "-", "rk"),
+                ])
+            except Exception as e:
+                st.warning(f"Fingerprint failed: {e}")
+
+            if active and _btn("ATTACH TO ACTIVE CASE", key="attach_evidence", variant="green"):
+                add_evidence_to_active_case(uploaded.name, data, notes)
+                log_event("ok", f"Attached evidence {uploaded.name} to {active['id']}")
+                st.success(f"Evidence {uploaded.name} attached to {active['id']}.")
+                st.rerun()
+        close_box()
+    with col2:
+        render_terminal("evidence-hash :: SHA256")
+        if active and active.get("evidence"):
+            open_box("ATTACHED EVIDENCE")
+            headers = ["FILENAME", "SHA-256", "WHEN"]
+            rows = [
+                [e["filename"], e["sha256"][:18] + "...", e["timestamp"].split("T")[1].split(".")[0]]
+                for e in active["evidence"]
+            ]
+            render_data_table(headers, rows)
+            close_box()
+
+
+def page_recovery_selector():
+    render_section_header("\U0001F50D", "RECOVERY PROBLEM SELECTOR", "PICK THE RIGHT TOOL")
     st.markdown(
-        "Wipes every Streamlit session-state key, including the contents of "
-        "every text input on every page. Use this before walking away from "
-        "the machine, and again before closing the browser tab."
+        "Select the closest match to your recovery situation. Each card routes to the appropriate"
+        " offline engine."
     )
-    if st.button("Clear everything now", type="primary"):
-        _clear_session()
-        st.success("Session cleared.")
+    grid = st.columns(2)
+    items = [
+        ("Missing 1-2 Words", "Brute-force the unknown slots while checking a target address.", PAGE_INCOMPLETE_SEED, "purple"),
+        ("Misspelled Words", "Levenshtein suggestions against the BIP39 wordlist.", PAGE_TYPO_LAB, "orange"),
+        ("Words Out of Order", f"Permute up to {MAX_ORDER_POSITIONS} words to find a valid checksum.", PAGE_WRONG_ORDER, "cyan"),
+        ("Forgot Passphrase", "Test a candidate BIP39 passphrase against a target address.", PAGE_PASSPHRASE, "green"),
+        ("Unknown Path", "Compare a mnemonic across all standard BIP44/49/84 paths.", PAGE_DERIVATION, "cyan"),
+        ("Address Match Search", "Search the standard window for a known address.", PAGE_ADDRESS_MATCHER, "purple"),
+    ]
+    for i, (title, desc, page, variant) in enumerate(items):
+        with grid[i % 2]:
+            st.markdown(
+                f'<div class="cx-card"><h4>{_esc(title)}</h4>'
+                f'<div style="color:var(--dim);margin-bottom:8px">{_esc(desc)}</div></div>',
+                unsafe_allow_html=True,
+            )
+            if _btn(f"LAUNCH {title.upper()}", key=f"rs_{page}", variant=variant, use_container_width=True):
+                st.session_state["current_page"] = page
+                log_event("info", f"Routed to {page}")
+                st.rerun()
+
+
+def page_bip39_validation():
+    render_section_header("\U0001F510", "BIP39 VALIDATION LAB", "WORDLIST + CHECKSUM")
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        open_box("MNEMONIC VALIDATOR", live=True)
+        mnemonic = st.text_area("Mnemonic (12/15/18/21/24 words)", key="bip39_in", height=110)
+        if _btn("VALIDATE PHRASE", key="bip39_run", variant="green"):
+            if not mnemonic.strip():
+                st.warning("Provide a mnemonic phrase.")
+            else:
+                report = validate_mnemonic(mnemonic)
+                color = "rv" if report["valid"] else "rr"
+                render_rblock([
+                    ("WORD COUNT", str(report["word_count"]), "ra"),
+                    ("WORD COUNT VALID", str(report["word_count_valid"]), "rv" if report["word_count_valid"] else "rr"),
+                    ("WORDS IN BIP39 LIST", str(report["words_in_wordlist"]), "rv" if report["words_in_wordlist"] else "rr"),
+                    ("CHECKSUM VALID", str(report["checksum_valid"]), "rv" if report["checksum_valid"] else "rr"),
+                    ("OVERALL VALID", str(report["valid"]), color),
+                ])
+                if report["valid"]:
+                    log_event("ok", "Mnemonic validated (all checks pass)")
+                    st.success("Mnemonic is a valid BIP39 phrase.")
+                else:
+                    log_event("warn", "Mnemonic validation failed")
+                    st.error("Mnemonic did not pass all BIP39 checks.")
+        close_box()
+    with col2:
+        render_terminal("bip39 :: validator")
+
+
+def page_incomplete_seed():
+    render_section_header("\U0001F50E", "INCOMPLETE SEED RECOVERY", f"BRUTE FORCE ≤ {MAX_MISSING_WORDS} UNKNOWNS")
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        open_box("SEED PHRASE RECONSTRUCTION", live=True)
+        phrase = st.text_area(
+            "KNOWN WORDS - use '?' for each unknown position",
+            value="",
+            key="inc_phrase",
+            height=100,
+        )
+        target = st.text_input("TARGET ADDRESS (optional - filter candidates)", key="inc_target")
+        unknowns_in_input = phrase.count("?")
+
+        render_status_cards([
+            ("UNKNOWN WORDS", str(unknowns_in_input), "orange" if unknowns_in_input else ""),
+            ("ENGINE", "OFFLINE", "green"),
+            ("MAX UNKNOWNS", str(MAX_MISSING_WORDS), ""),
+            ("CHECKED", str(st.session_state.get("inc_last_checked", 0)), "" ),
+        ])
+
+        if _btn("RUN RECOVERY", key="inc_run", variant="orange"):
+            if not phrase.strip() or "?" not in phrase:
+                st.warning("Phrase must contain '?' to indicate missing words.")
+            elif unknowns_in_input > MAX_MISSING_WORDS:
+                st.error(f"Engine is hard-capped at {MAX_MISSING_WORDS} unknowns.")
+                log_event("err", f"Refused recovery: {unknowns_in_input} > {MAX_MISSING_WORDS}")
+            else:
+                target_arg = target.strip() or None
+                with st.spinner(f"Iterating {2048 ** unknowns_in_input:,} candidate combinations..."):
+                    try:
+                        result = recover_missing_words(
+                            phrase,
+                            target_address=target_arg,
+                            max_unknowns=MAX_MISSING_WORDS,
+                        )
+                    except ValueError as e:
+                        log_event("err", f"Recovery error: {e}")
+                        st.error(str(e))
+                        return
+                st.session_state["inc_last_checked"] = result["checked"]
+                cand = result["candidates"]
+                if cand:
+                    log_event("ok", f"Recovered {len(cand)} candidate(s) in {result['checked']:,} checks")
+                    st.success(f"Found {len(cand)} candidate phrase(s).")
+                    st.session_state["recovery_candidates"] = cand
+                    for c in cand[:10]:
+                        st.code(c, language="text")
+                    if result["truncated"]:
+                        st.warning("Result list truncated at 100 candidates.")
+                else:
+                    log_event("warn", "No candidates produced")
+                    st.error("No checksum-valid candidates produced.")
+        close_box()
+    with col2:
+        render_terminal("recovery :: missing-words")
+
+
+def page_typo_lab():
+    render_section_header("\U0001F520", "TYPO CORRECTION LAB", "LEVENSHTEIN SUGGESTIONS")
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        open_box("WORDLIST TYPO ANALYZER", live=True)
+        phrase = st.text_area("Phrase to analyze (typos OK)", key="typo_in", height=100)
+        max_sugs = st.number_input("SUGGESTIONS PER WORD", 1, 20, value=5, key="typo_max")
+        if _btn("RUN SPELL CHECK", key="typo_run", variant="orange"):
+            if not phrase.strip():
+                st.warning("Provide a phrase.")
+            else:
+                try:
+                    result = suggest_typo_corrections(phrase, max_suggestions=int(max_sugs))
+                except ValueError as e:
+                    st.error(str(e))
+                    log_event("err", f"Typo lab error: {e}")
+                    return
+                if result["all_words_known"]:
+                    log_event("ok", "All words are in BIP39 wordlist")
+                    st.success("All words are valid BIP39 entries. No corrections needed.")
+                else:
+                    unk = result["unknown_words"]
+                    log_event("warn", f"Found {len(unk)} unknown word(s)")
+                    st.warning(f"Found {len(unk)} word(s) not in the BIP39 list.")
+                    headers = ["#", "POSITION", "WORD", "SUGGESTIONS"]
+                    rows = [
+                        [str(i + 1), str(u["position"] + 1), u["word"], ", ".join(u["suggestions"])]
+                        for i, u in enumerate(unk)
+                    ]
+                    render_data_table(headers, rows)
+        close_box()
+    with col2:
+        render_terminal("recovery :: typo")
+
+
+def page_wrong_order():
+    render_section_header("\U0001F500", "WRONG WORD ORDER HELPER", f"PERMUTE ≤ {MAX_ORDER_POSITIONS} WORDS")
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        open_box("WORD ORDER RECOVERY", live=True)
+        phrase = st.text_area(
+            "Words (space-separated, any order)",
+            key="wo_in", height=100,
+        )
+        target = st.text_input("TARGET ADDRESS (optional)", key="wo_target")
+        word_count = len(phrase.split())
+        render_status_cards([
+            ("WORD COUNT", str(word_count), "orange" if word_count > MAX_ORDER_POSITIONS else "green" if word_count else ""),
+            ("CAP", str(MAX_ORDER_POSITIONS), ""),
+            ("PERMUTATIONS", f"{(1 if word_count == 0 else __import__('math').factorial(min(word_count, MAX_ORDER_POSITIONS))):,}", ""),
+            ("ENGINE", "OFFLINE", "green"),
+        ])
+        if _btn("RUN ORDER RECOVERY", key="wo_run", variant="orange"):
+            if word_count == 0:
+                st.warning("Provide some words.")
+            elif word_count > MAX_ORDER_POSITIONS:
+                st.error(f"Engine is hard-capped at {MAX_ORDER_POSITIONS} words.")
+                log_event("err", f"Refused order recovery: {word_count} > {MAX_ORDER_POSITIONS}")
+            else:
+                target_arg = target.strip() or None
+                words = phrase.split()
+                with st.spinner("Permuting and validating..."):
+                    try:
+                        result = recover_word_order(words, target_address=target_arg)
+                    except ValueError as e:
+                        st.error(str(e))
+                        log_event("err", f"Order recovery error: {e}")
+                        return
+                cand = result["candidates"]
+                if cand:
+                    log_event("ok", f"Order recovery returned {len(cand)} candidate(s)")
+                    st.success(f"Found {len(cand)} valid ordering(s).")
+                    for c in cand[:10]:
+                        st.code(c, language="text")
+                    if result["truncated"]:
+                        st.warning("Truncated at 100 candidates.")
+                else:
+                    log_event("warn", "No valid orderings found")
+                    st.error("No checksum-valid orderings found.")
+        close_box()
+    with col2:
+        render_terminal("recovery :: order")
+
+
+def page_passphrase():
+    render_section_header("\U0001F511", "BIP39 PASSPHRASE TESTING", "DERIVE WITH 25TH WORD")
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        open_box("PASSPHRASE PROBE", live=True)
+        mnemonic = st.text_area("MNEMONIC (12/15/18/21/24 words)", key="pp_mnem", height=90)
+        passphrase = st.text_input("PASSPHRASE (25th word)", key="pp_pass", type="password")
+        target = st.text_input("TARGET ADDRESS (optional)", key="pp_target")
+        count = st.number_input("ADDRESSES PER PATH", 1, 20, value=5, key="pp_count")
+        if _btn("TEST PASSPHRASE", key="pp_run", variant="green"):
+            if not mnemonic.strip():
+                st.warning("Provide a mnemonic.")
+            else:
+                try:
+                    result = test_passphrase(
+                        mnemonic, passphrase or "",
+                        target_address=target.strip() or None,
+                        count=int(count),
+                    )
+                except ValueError as e:
+                    st.error(str(e))
+                    log_event("err", f"Passphrase test error: {e}")
+                    return
+                if result["match"]:
+                    m = result["match"]
+                    log_event("ok", f"Passphrase match on {m['address_type']} {m['path']}")
+                    st.success(f"Match found: {m['address']} ({m['address_type']}, {m['path']}).")
+                else:
+                    log_event("info", "Passphrase derivation complete, no target match.")
+                    if target.strip():
+                        st.warning("Derivation succeeded but no derived address matched the target.")
+                    else:
+                        st.info("Derivation succeeded.")
+                rows = [
+                    [a["coin"], a["address_type"], a["path"], a["address"]]
+                    for a in result["addresses"]
+                ]
+                render_data_table(["COIN", "TYPE", "PATH", "ADDRESS"], rows)
+                st.session_state["last_derivations"] = result["addresses"]
+        close_box()
+    with col2:
+        render_terminal("recovery :: passphrase")
+
+
+def page_derivation():
+    render_section_header("⚡", "DERIVATION PATH SCANNER", "COMPARE BIP44/49/84")
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        open_box("ALL STANDARDS SCAN", live=True)
+        mnemonic = st.text_area("MNEMONIC", key="dp_mnem", height=90)
+        count = st.number_input("ADDRESSES PER STANDARD", 1, 10, value=3, key="dp_count")
+        if _btn("SCAN STANDARDS", key="dp_run", variant="cyan"):
+            if not mnemonic.strip():
+                st.warning("Provide a mnemonic.")
+            else:
+                try:
+                    rows_data = compare_all_standards(mnemonic, count=int(count))
+                except ValueError as e:
+                    st.error(str(e))
+                    log_event("err", f"Derivation scan error: {e}")
+                    return
+                log_event("ok", f"Scanned {len(rows_data)} addresses across standards")
+                rows = [[r["coin"], r["address_type"], r["path"], r["address"]] for r in rows_data]
+                render_data_table(["COIN", "TYPE", "PATH", "ADDRESS"], rows)
+                st.session_state["last_derivations"] = rows_data
+        close_box()
+    with col2:
+        render_terminal("derivation :: scanner")
+
+
+def page_address_matcher():
+    render_section_header("\U0001F3AF", "KNOWN ADDRESS MATCHER", "SCAN STANDARD WINDOW")
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        open_box("ADDRESS LOOKUP", live=True)
+        mnemonic = st.text_area("MNEMONIC", key="am_mnem", height=90)
+        target = st.text_input("TARGET ADDRESS", key="am_target")
+        depth = st.number_input("ADDRESSES PER STANDARD", 1, 50, value=20, key="am_depth")
+        if _btn("FIND ADDRESS", key="am_run", variant="cyan"):
+            if not (mnemonic.strip() and target.strip()):
+                st.warning("Mnemonic and target address required.")
+            else:
+                try:
+                    result = find_address_match(mnemonic, target, max_addresses_per_standard=int(depth))
+                except ValueError as e:
+                    st.error(str(e))
+                    log_event("err", f"Matcher error: {e}")
+                    return
+                if result["match"]:
+                    m = result["match"]
+                    log_event("ok", f"Address match: {m['path']}")
+                    render_rblock([
+                        ("MATCH", "FOUND", "rv"),
+                        ("COIN", m["coin"], "ra"),
+                        ("TYPE", m["address_type"], "ra"),
+                        ("PATH", m["path"], "rv"),
+                        ("ADDRESS", m["address"], "rv"),
+                        ("SEARCHED", f"{result['searched']} candidates", "rk"),
+                    ])
+                else:
+                    log_event("warn", f"No match in {result['searched']} candidates")
+                    st.error(f"No match found in {result['searched']} candidates.")
+                st.session_state["last_derivations"] = result["candidates"]
+        close_box()
+    with col2:
+        render_terminal("derivation :: matcher")
+
+
+def page_address_gen():
+    render_section_header("\U0001F4B3", "ETH/BTC ADDRESS GENERATOR", "DERIVE PUBLIC ADDRESSES")
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        open_box("STANDARD DERIVATION", live=True)
+        mnemonic = st.text_area("MNEMONIC", key="ag_mnem", height=90)
+        coin_choice = st.selectbox(
+            "COIN / ADDRESS TYPE",
+            ["ETH",
+             f"BTC - {BTC_ADDRESS_TYPES['legacy']['label']}",
+             f"BTC - {BTC_ADDRESS_TYPES['segwit']['label']}",
+             f"BTC - {BTC_ADDRESS_TYPES['native_segwit']['label']}"],
+        )
+        count = st.number_input("COUNT", 1, 50, value=5, key="ag_count")
+        if _btn("DERIVE", key="ag_run", variant="green"):
+            if not mnemonic.strip():
+                st.warning("Provide a mnemonic.")
+            else:
+                try:
+                    if coin_choice == "ETH":
+                        rows_data = derive_eth_addresses(mnemonic, count=int(count))
+                    else:
+                        atype = next(k for k, v in BTC_ADDRESS_TYPES.items() if v["label"] in coin_choice)
+                        rows_data = derive_btc_addresses(mnemonic, address_type=atype, count=int(count))
+                except ValueError as e:
+                    st.error(str(e))
+                    log_event("err", f"Generator error: {e}")
+                    return
+                log_event("ok", f"Derived {len(rows_data)} {coin_choice} addresses")
+                render_data_table(
+                    ["COIN", "TYPE", "PATH", "ADDRESS"],
+                    [[r["coin"], r["address_type"], r["path"], r["address"]] for r in rows_data],
+                )
+                st.session_state["last_derivations"] = rows_data
+        close_box()
+    with col2:
+        render_terminal("derivation :: generator")
+
+
+def page_entropy():
+    render_section_header("\U0001F3B2", "ENTROPY ANALYSIS LAB", "SHANNON + CHI-SQUARE")
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        open_box("ENTROPY TEST BATTERY", live=True)
+        text_input = st.text_area("INPUT TEXT / DATA (or hex)", key="ent_in", height=120)
+        as_hex = st.checkbox("Treat input as hex bytes", key="ent_hex")
+        if _btn("ANALYZE ENTROPY", key="ent_run", variant="cyan"):
+            if not text_input:
+                st.warning("Provide input.")
+            else:
+                try:
+                    if as_hex:
+                        data = hex_to_bytes(text_input)
+                    else:
+                        data = text_input.encode("utf-8")
+                    res = analyze_entropy(data)
+                except ValueError as e:
+                    st.error(str(e))
+                    log_event("err", f"Entropy error: {e}")
+                    return
+                log_event("ok", f"Entropy analyzed: {res['quality']}, H={res['shannon_entropy']:.4f}")
+                q_color = {"HIGH": "green", "MODERATE": "", "LOW": "orange", "POOR": "red", "EMPTY": "red"}.get(res["quality"], "")
+                render_status_cards([
+                    ("SHANNON", f"{res['shannon_entropy']:.4f}", q_color, "bits/byte"),
+                    ("CHI-SQUARE", f"{res['chi_square']:.2f}", ""),
+                    ("UNIQUE BYTES", f"{res['unique_bytes']}/256", ""),
+                    ("QUALITY", res["quality"], q_color),
+                ])
+                render_rblock([
+                    ("SIZE", f"{res['size_bytes']} bytes", "ra"),
+                    *[(f"NOTE {i+1}", n, "rk") for i, n in enumerate(res["notes"])],
+                ])
+        close_box()
+    with col2:
+        render_terminal("entropy :: analyzer")
+
+
+def page_vault_inspect():
+    render_section_header("\U0001F98A", "METAMASK VAULT INSPECTOR", "STRUCTURE + KDF METADATA")
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        open_box("VAULT METADATA SCAN", live=True)
+        vault_text = st.text_area(
+            "Paste MetaMask vault JSON (encrypted blob - never decrypted)",
+            key="vault_in", height=180,
+        )
+        if _btn("INSPECT VAULT", key="vault_run", variant="purple"):
+            if not vault_text.strip():
+                st.warning("Provide vault JSON.")
+            else:
+                try:
+                    info = inspect_metamask_vault(vault_text)
+                except ValueError as e:
+                    st.error(str(e))
+                    log_event("err", f"Vault inspect error: {e}")
+                    return
+                log_event("ok", f"Vault inspected: format={info['format']}")
+                render_status_cards([
+                    ("FORMAT", info["format"], "green" if info["format"].startswith("metamask") else "orange"),
+                    ("KDF", info["kdf"], ""),
+                    ("ITERATIONS", f"{info['kdf_iterations']:,}", "" if info["kdf_iterations"] >= 100000 else "orange"),
+                    ("CIPHERTEXT", f"{info['ciphertext_len_bytes']} B", ""),
+                ])
+                render_rblock([
+                    ("SALT LEN", f"{info['salt_len_bytes']} bytes", "ra"),
+                    ("IV LEN", f"{info['iv_len_bytes']} bytes", "ra"),
+                    ("CIPHERTEXT SHA-256", info["ciphertext_sha256"] or "-", "ro"),
+                    ("RAW KEYS", ", ".join(info["raw_keys"]) or "-", "rk"),
+                ])
+                for n in info["notes"]:
+                    st.caption(n)
+        close_box()
+    with col2:
+        render_terminal("forensics :: vault")
+
+
+def page_hash_tools():
+    render_section_header("\U0001F9EE", "HASH / CRYPTO TOOLS", "ALL OFFLINE")
+    tabs = st.tabs(["HASHES", "ENCODE / DECODE", "UNIT CONVERT"])
+    with tabs[0]:
+        col1, col2 = st.columns([3, 2])
+        with col1:
+            open_box("HASH CALCULATOR", live=True)
+            data_in = st.text_area("INPUT (text or hex)", key="hash_in", height=120)
+            encoding = st.selectbox("INPUT ENCODING", ["UTF-8 Text", "Hex", "Base64"], key="hash_enc")
+            if _btn("COMPUTE ALL HASHES", key="hash_run", variant="green"):
+                try:
+                    if encoding == "Hex":
+                        data = hex_to_bytes(data_in)
+                    elif encoding == "Base64":
+                        data = b64_to_bytes(data_in)
+                    else:
+                        data = data_in.encode("utf-8")
+                except ValueError as e:
+                    st.error(str(e))
+                    return
+                log_event("ok", f"Hashed {len(data)} bytes")
+                render_rblock([
+                    ("SIZE", f"{len(data)} bytes", "ra"),
+                    ("MD5", calculate_md5(data), "ro"),
+                    ("SHA-1", calculate_sha1(data), "ro"),
+                    ("SHA-256", calculate_sha256(data), "rv"),
+                    ("SHA-512", calculate_sha512(data), "rv"),
+                    ("RIPEMD-160", calculate_ripemd160(data), "ra"),
+                    ("HASH160", calculate_hash160(data), "ra"),
+                    ("DOUBLE-SHA256", calculate_double_sha256(data), "ra"),
+                ])
+            close_box()
+        with col2:
+            render_terminal("crypto :: hashes")
+    with tabs[1]:
+        open_box("ENCODE / DECODE")
+        d_in = st.text_area("INPUT", key="enc_in", height=100)
+        op = st.selectbox(
+            "OPERATION",
+            [
+                "HEX -> Base58", "Base58 -> HEX",
+                "HEX -> Base64", "Base64 -> HEX",
+                "UTF-8 -> HEX", "HEX -> UTF-8",
+            ],
+            key="enc_op",
+        )
+        if _btn("CONVERT", key="enc_run", variant="cyan"):
+            try:
+                if op == "HEX -> Base58":
+                    out = encode_base58(hex_to_bytes(d_in))
+                elif op == "Base58 -> HEX":
+                    out = bytes_to_hex(decode_base58(d_in.strip()))
+                elif op == "HEX -> Base64":
+                    out = bytes_to_b64(hex_to_bytes(d_in))
+                elif op == "Base64 -> HEX":
+                    out = bytes_to_hex(b64_to_bytes(d_in.strip()))
+                elif op == "UTF-8 -> HEX":
+                    out = bytes_to_hex(d_in.encode("utf-8"))
+                elif op == "HEX -> UTF-8":
+                    out = hex_to_bytes(d_in).decode("utf-8", errors="replace")
+                else:
+                    out = "?"
+                log_event("ok", f"Encoded via {op}")
+                render_rblock([("OPERATION", op, "ra"), ("RESULT", out, "rv")])
+            except ValueError as e:
+                st.error(str(e))
+        close_box()
+    with tabs[2]:
+        open_box("UNIT CONVERTER")
+        col1, col2 = st.columns(2)
+        with col1:
+            sat = st.text_input("SATOSHI", key="cv_sat")
+            if _btn("SAT -> BTC", key="cv_sat_run"):
+                try:
+                    n = int(sat)
+                    st.code(f"{satoshi_to_btc(n)} BTC", language="text")
+                except ValueError:
+                    st.error("Satoshi must be an integer.")
+        with col2:
+            wei = st.text_input("WEI", key="cv_wei")
+            if _btn("WEI -> ETH", key="cv_wei_run"):
+                try:
+                    n = int(wei)
+                    st.code(f"{wei_to_eth(n)} ETH", language="text")
+                except ValueError:
+                    st.error("Wei must be an integer.")
+        close_box()
+
+
+def page_live_addr():
+    render_section_header("\U0001F4E1", "LIVE ADDRESS LOOKUP", "PUBLIC NETWORK CALL")
+    if not is_live():
+        st.error("LIVE ANALYSIS mode required. Engage from the sidebar.")
+        return
+    if live_utils is None:
+        st.error("live_utils module is unavailable in this build.")
+        return
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        open_box("ADDRESS QUERY", live=True)
+        chain = st.selectbox("CHAIN", ["Bitcoin", "Ethereum"], key="liveaddr_chain")
+        addr = st.text_input("ADDRESS", key="liveaddr_addr")
+        if _btn("LOOKUP", key="liveaddr_run", variant="cyan"):
+            if not addr.strip():
+                st.warning("Address required.")
+            else:
+                try:
+                    with st.spinner("Calling public API..."):
+                        if chain == "Bitcoin":
+                            data = live_utils.lookup_btc_address(addr)
+                            log_event("ok", f"BTC lookup OK for {addr[:12]}...")
+                            render_rblock([
+                                ("ADDRESS", data["address"], "ra"),
+                                ("BALANCE (sats)", f"{data['balance_satoshi']:,}", "rv"),
+                                ("BALANCE (BTC)", satoshi_to_btc(int(data["balance_satoshi"])), "rv"),
+                                ("TX COUNT", str(data["tx_count"]), "ra"),
+                            ])
+                        else:
+                            data = live_utils.lookup_eth_address(addr)
+                            log_event("ok", f"ETH lookup OK for {addr[:12]}...")
+                            render_rblock([
+                                ("ADDRESS", data["address"], "ra"),
+                                ("BALANCE (wei)", f"{data['balance_wei']:,}", "rv"),
+                                ("BALANCE (ETH)", wei_to_eth(int(data["balance_wei"])), "rv"),
+                            ])
+                except Exception as e:
+                    st.error(f"Lookup failed: {e}")
+                    log_event("err", f"Lookup error: {e}")
+        close_box()
+        open_box("LIVE MEMPOOL FEES")
+        if _btn("FETCH BTC FEES", key="fees_run", variant="green"):
+            try:
+                fees = live_utils.get_mempool_fees()
+                rows = [[k, str(v), "sat/vB"] for k, v in fees.items()]
+                render_data_table(["TIER", "FEE", "UNIT"], rows)
+                log_event("ok", "Fetched mempool fees")
+            except Exception as e:
+                st.error(f"Fee fetch failed: {e}")
+                log_event("err", f"Fee fetch error: {e}")
+        close_box()
+    with col2:
+        render_terminal("live :: address")
+
+
+def page_live_tx():
+    render_section_header("\U0001F4E1", "LIVE TX LOOKUP", "BLOCKSTREAM API")
+    if not is_live():
+        st.error("LIVE ANALYSIS mode required. Engage from the sidebar.")
+        return
+    if live_utils is None:
+        st.error("live_utils module is unavailable in this build.")
+        return
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        open_box("TRANSACTION QUERY", live=True)
+        chain = st.selectbox("CHAIN", ["Bitcoin"], key="livetx_chain")
+        txid = st.text_input("TXID (64 hex)", key="livetx_id")
+        if _btn("FETCH TX", key="livetx_run", variant="cyan"):
+            if not txid.strip():
+                st.warning("TXID required.")
+            else:
+                try:
+                    with st.spinner("Calling Blockstream..."):
+                        data = live_utils.lookup_btc_transaction(txid.strip())
+                    log_event("ok", f"TX fetched: {txid[:12]}...")
+                    rows = [
+                        ("TXID", data.get("txid", "-"), "ra"),
+                        ("SIZE", str(data.get("size", "-")), "rv"),
+                        ("WEIGHT", str(data.get("weight", "-")), "rv"),
+                        ("FEE (sats)", f"{data.get('fee', 0):,}", "ro"),
+                        ("VIN", str(len(data.get("vin", []))), "ra"),
+                        ("VOUT", str(len(data.get("vout", []))), "ra"),
+                        ("STATUS", "CONFIRMED" if data.get("status", {}).get("confirmed") else "UNCONFIRMED", "rv"),
+                    ]
+                    render_rblock(rows)
+                    st.caption("Raw JSON below for full evidence record.")
+                    st.code(json.dumps(data, indent=2)[:4000], language="json")
+                except Exception as e:
+                    st.error(f"TX lookup failed: {e}")
+                    log_event("err", f"TX lookup error: {e}")
+        close_box()
+    with col2:
+        render_terminal("live :: tx")
+
+
+def page_airgap_guide():
+    render_section_header("\U0001F6AB", "AIR-GAPPED OPS GUIDE", "PHYSICAL ISOLATION PROTOCOL")
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        open_box("AIRGAP CHECKLIST")
+        st.markdown(
+            """
+1. **Cut all network paths.** Pull the Ethernet cable. Disable Wi-Fi and Bluetooth
+   in the BIOS, not just the OS. Verify with `ip link` / `iwconfig`.
+2. **Boot off a known-good medium.** Tails, an offline Ubuntu live USB, or your
+   internal install only if you trust it.
+3. **Cover sensors.** Tape over webcams. Disconnect microphones.
+4. **Use a dedicated keyboard and screen.** No KVM that has been on a network.
+5. **No removable media in / out** without an out-of-band hash check.
+6. **Operate from a quiet room.** Side-channel paranoia is appropriate when the
+   stakes are high; ambient acoustic logging of keystrokes is a real attack.
+            """
+        )
+        close_box()
+        open_box("PSBT / OFFLINE SIGNING WORKFLOW")
+        st.markdown(
+            """
+- Build the unsigned PSBT on the online (watch-only) machine.
+- Transfer via QR code or a freshly-formatted SD card.
+- Sign on the airgapped machine using a dedicated wallet UI.
+- Transfer the signed PSBT back via the same out-of-band channel.
+- Broadcast from the watch-only machine. The airgapped device never
+  speaks to the network.
+            """
+        )
+        close_box()
+    with col2:
+        render_terminal("airgap :: protocol")
+
+
+def page_exporter():
+    render_section_header("\U0001F4CA", "RECOVERY REPORT EXPORTER", "TXT / CSV / PDF / QR")
+    addresses = st.session_state.get("last_derivations", [])
+    active = get_active_case()
+    notes_default = ""
+    if active:
+        notes_default = (
+            f"Case: {active['id']} {active['name']}\n"
+            f"Investigator: {active['investigator']}\n"
+            f"Chain: {active['chain']}"
+        )
+
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        open_box("REPORT BUILDER", live=True)
+        st.write(f"Records available in session: **{len(addresses)}**.")
+        notes = st.text_area("REPORT NOTES (free text - do NOT paste secrets)", value=notes_default, key="exp_notes", height=120)
+
+        if addresses:
+            preview = build_txt_report(addresses[:10], notes=notes)
+            st.code(preview[:1500], language="text")
+        else:
+            st.caption("No addresses yet. Run DERIVATION SCANNER or ADDRESS GENERATOR first.")
+
+        bcol1, bcol2, bcol3 = st.columns(3)
+        with bcol1:
+            st.markdown('<div class="btn-green">', unsafe_allow_html=True)
+            if addresses:
+                st.download_button(
+                    "DOWNLOAD TXT",
+                    data=build_txt_report(addresses, notes=notes),
+                    file_name="cryptex_report.txt",
+                    mime="text/plain",
+                    key="dl_txt",
+                )
+            st.markdown("</div>", unsafe_allow_html=True)
+        with bcol2:
+            st.markdown('<div class="btn-green">', unsafe_allow_html=True)
+            if addresses:
+                st.download_button(
+                    "DOWNLOAD CSV",
+                    data=build_csv_report(addresses, notes=notes),
+                    file_name="cryptex_report.csv",
+                    mime="text/csv",
+                    key="dl_csv",
+                )
+            st.markdown("</div>", unsafe_allow_html=True)
+        with bcol3:
+            st.markdown('<div class="btn-green">', unsafe_allow_html=True)
+            if addresses:
+                try:
+                    pdf_bytes = build_pdf_report(addresses, notes=notes)
+                    st.download_button(
+                        "DOWNLOAD PDF",
+                        data=pdf_bytes,
+                        file_name="cryptex_report.pdf",
+                        mime="application/pdf",
+                        key="dl_pdf",
+                    )
+                except Exception as e:
+                    st.error(f"PDF build failed: {e}")
+            st.markdown("</div>", unsafe_allow_html=True)
+        close_box()
+
+        if addresses:
+            open_box("QR CODE FOR A SINGLE ADDRESS")
+            choices = [f"{i+1}: {a['address']}" for i, a in enumerate(addresses)]
+            chosen = st.selectbox("ADDRESS", choices, key="qr_choice")
+            idx = int(chosen.split(":", 1)[0]) - 1
+            try:
+                png = build_qr_png(addresses[idx]["address"], box_size=6)
+                st.image(png, caption=addresses[idx]["address"], width=240)
+                st.download_button("DOWNLOAD QR PNG", data=png, file_name="address_qr.png", mime="image/png", key="dl_qr")
+            except ValueError as e:
+                st.error(str(e))
+            close_box()
+    with col2:
+        render_terminal("export :: report")
+
+
+def page_education():
+    render_section_header("\U0001F4DA", "EDUCATIONAL LAB", "REFERENCE MATERIAL")
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        open_box("CORE STANDARDS")
+        st.markdown(
+            """
+- [BIP-0039 (mnemonic phrases)](https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki)
+- [BIP-0032 (HD wallets)](https://github.com/bitcoin/bips/blob/master/bip-0032.mediawiki)
+- [BIP-0044 (multi-account hierarchy)](https://github.com/bitcoin/bips/blob/master/bip-0044.mediawiki)
+- [BIP-0049 (P2SH-P2WPKH)](https://github.com/bitcoin/bips/blob/master/bip-0049.mediawiki)
+- [BIP-0084 (native SegWit)](https://github.com/bitcoin/bips/blob/master/bip-0084.mediawiki)
+- [BIP-0086 (Taproot)](https://github.com/bitcoin/bips/blob/master/bip-0086.mediawiki)
+- [SLIP-0039 (Shamir secret sharing)](https://github.com/satoshilabs/slips/blob/master/slip-0039.md)
+            """
+        )
+        close_box()
+        open_box("HARDWARE WALLETS")
+        st.markdown(
+            """
+- Ledger device airgap recommendations.
+- Trezor + Coldcard PSBT workflows.
+- Common CVEs touching hardware wallets are tracked in the public CVE
+  database. When working a recovery, sanity-check the device firmware
+  version against the vendor changelog before deriving anything important.
+            """
+        )
+        close_box()
+    with col2:
+        open_box("OPSEC PRIMER")
+        st.markdown(
+            """
+- Treat the recovery session like incident response: log every step,
+  hash every evidence file, keep a chain-of-custody record.
+- Discuss seeds and keys only verbally in a private space.
+- Wipe the host between unrelated cases; this app exposes
+  CLEAR SESSION in the sidebar for exactly that reason.
+- Don't paste secrets into the **NOTES** field of the exporter. The
+  exporter's address whitelist will not save you from that mistake.
+            """
+        )
+        close_box()
+
+
+def page_wipe():
+    render_section_header("\U0001F9F9", "CLEAR SESSION", "FULL WIPE")
+    st.warning(
+        "This destroys every case, every derivation, every entropy result, "
+        "and the activity log. There is no undo."
+    )
+    if _btn("CONFIRM SESSION WIPE", key="wipe_confirm", variant="red"):
+        wipe_session_state(st)
+        log_event("ok", "Session wiped")
+        st.success("Session state cleared. Reloading...")
         st.rerun()
 
 
@@ -1242,56 +1923,78 @@ def page_clear() -> None:
 # Router
 # ---------------------------------------------------------------------------
 
-PAGES = {
-    "Home (read first)":       page_home,
-    "Recovery workflow":       page_problem_selector,
-    "Tools":                   page_tools,
-    "Educational lab":         page_education,
-    "Recovery report":         page_report,
-    "Clear session":           page_clear,
+ROUTE = {
+    PAGE_SECURITY_LANDING: page_security_landing,
+    PAGE_RECOVERY_SELECTOR: page_recovery_selector,
+    PAGE_CASE_MGMT: page_case_mgmt,
+    PAGE_EVIDENCE_HASH: page_evidence_hash,
+    PAGE_BIP39_VALIDATION: page_bip39_validation,
+    PAGE_INCOMPLETE_SEED: page_incomplete_seed,
+    PAGE_TYPO_LAB: page_typo_lab,
+    PAGE_WRONG_ORDER: page_wrong_order,
+    PAGE_PASSPHRASE: page_passphrase,
+    PAGE_DERIVATION: page_derivation,
+    PAGE_ADDRESS_MATCHER: page_address_matcher,
+    PAGE_ADDRESS_GEN: page_address_gen,
+    PAGE_ENTROPY: page_entropy,
+    PAGE_VAULT_INSPECT: page_vault_inspect,
+    PAGE_HASH_TOOLS: page_hash_tools,
+    PAGE_LIVE_ADDR: page_live_addr,
+    PAGE_LIVE_TX: page_live_tx,
+    PAGE_AIRGAP_GUIDE: page_airgap_guide,
+    PAGE_EXPORTER: page_exporter,
+    PAGE_EDUCATION: page_education,
+    PAGE_WIPE: page_wipe,
 }
+
+# Pages that require offline mode (locked when LIVE_ANALYSIS active).
+OFFLINE_LOCKED_PAGES = {
+    PAGE_INCOMPLETE_SEED, PAGE_TYPO_LAB, PAGE_WRONG_ORDER,
+    PAGE_PASSPHRASE, PAGE_DERIVATION, PAGE_ADDRESS_MATCHER,
+    PAGE_ADDRESS_GEN, PAGE_BIP39_VALIDATION, PAGE_VAULT_INSPECT,
+    PAGE_RECOVERY_SELECTOR,
+}
+LIVE_LOCKED_PAGES = {PAGE_LIVE_ADDR, PAGE_LIVE_TX}
 
 
 def main() -> None:
-    _init_state()
-    _inject_css()
-    with st.sidebar:
-        st.markdown(
-            '<div style="display:flex;align-items:center;gap:0.55rem;'
-            'margin:0.2rem 0 1rem 0;">'
-            '<span style="font-family:var(--owl-mono);color:var(--owl-accent);'
-            'font-size:1.25rem;letter-spacing:-0.04em;">[ ◆ ]</span>'
-            '<span style="font-weight:600;color:var(--owl-text);">'
-            'Offline Wallet<br/>Recovery Lab</span>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-        choice = st.radio(
-            "Navigation", list(PAGES.keys()), label_visibility="collapsed",
-        )
-        st.divider()
-        st.markdown(
-            '<span class="owl-pill"><span class="owl-dot"></span>'
-            'OFFLINE MODE</span>',
-            unsafe_allow_html=True,
-        )
-        n = len(st.session_state.get(RESULTS_KEY, []))
-        if n:
-            st.markdown(
-                f'<div style="margin-top:0.5rem;"><span class="owl-pill">'
-                f'{n} address(es) derived</span></div>',
-                unsafe_allow_html=True,
-            )
-        st.caption("Verify your machine is disconnected before pasting "
-                   "any real mnemonic.")
-    PAGES[choice]()
-    st.markdown(
-        '<div class="owl-footer">'
-        'OFFLINE WALLET RECOVERY LAB &middot; LOCAL BUILD &middot; '
-        'NO NETWORK &middot; NO TELEMETRY'
-        '</div>',
-        unsafe_allow_html=True,
+    st.set_page_config(
+        page_title="CRYPTEX LAB v3 - Forensic Workstation",
+        page_icon="\U0001F50D",
+        layout="wide",
+        initial_sidebar_state="expanded",
     )
+    init_mode()
+    init_case_registry()
+    inject_cryptex_css()
+
+    if "current_page" not in st.session_state:
+        st.session_state["current_page"] = PAGE_SECURITY_LANDING
+
+    page = render_sidebar()
+    render_header()
+    render_active_case_banner()
+
+    # Security guards: redirect to landing if user picks a locked page.
+    if is_live() and page in OFFLINE_LOCKED_PAGES:
+        st.error(
+            f"'{page}' handles sensitive material and is locked while LIVE ANALYSIS"
+            " mode is active. Return to OFFLINE SAFE in the sidebar."
+        )
+        log_event("warn", f"Blocked offline page {page} in live mode")
+        return
+    if is_offline() and page in LIVE_LOCKED_PAGES:
+        st.error(
+            f"'{page}' requires LIVE ANALYSIS mode. Engage from the sidebar to proceed."
+        )
+        log_event("warn", f"Blocked live page {page} in offline mode")
+        return
+
+    handler = ROUTE.get(page)
+    if handler:
+        handler()
+    else:
+        st.error(f"Unknown page: {page}")
 
 
 if __name__ == "__main__":
