@@ -171,7 +171,7 @@ footer {visibility:hidden;}
 .stApp::before {
   content:''; position:fixed; inset:0;
   background:repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,.04) 2px, rgba(0,0,0,.04) 4px);
-  pointer-events:none; z-index:9999;
+  pointer-events:none; z-index:0;
 }
 
 /* Grid overlay */
@@ -179,7 +179,7 @@ footer {visibility:hidden;}
   content:''; position:fixed; inset:0;
   background-image:linear-gradient(rgba(0,212,255,.03) 1px, transparent 1px),
                     linear-gradient(90deg, rgba(0,212,255,.03) 1px, transparent 1px);
-  background-size:40px 40px; pointer-events:none; z-index:0;
+  background-size:40px 40px; pointer-events:none; z-index:-1;
 }
 
 .main, .block-container {
@@ -193,30 +193,34 @@ footer {visibility:hidden;}
   background:var(--panel) !important;
   border-right:1px solid var(--border);
 }
-[data-testid="stSidebar"] .stRadio > label {display:none;}
-[data-testid="stSidebar"] .stRadio > div {gap:1px;}
-[data-testid="stSidebar"] .stRadio label {
-  font-family:'Rajdhani', sans-serif !important;
-  font-size:12px !important; font-weight:600;
+
+/* Sidebar nav buttons - make them look like nav items, not blocky buttons */
+[data-testid="stSidebar"] .stButton > button {
+  background:transparent !important;
+  border:none !important;
+  border-left:2px solid transparent !important;
+  border-radius:0 !important;
   color:var(--dim) !important;
+  font-family:'Rajdhani', sans-serif !important;
+  font-size:12px !important;
+  font-weight:600;
   padding:7px 14px !important;
-  border-left:2px solid transparent;
+  text-align:left !important;
+  justify-content:flex-start !important;
   transition:all .12s;
-  cursor:pointer;
-  display:flex; align-items:center;
-  width:100%;
+  box-shadow:none !important;
 }
-[data-testid="stSidebar"] .stRadio label:hover {
-  background:rgba(0,212,255,.05);
+[data-testid="stSidebar"] .stButton > button:hover {
+  background:rgba(0,212,255,.05) !important;
   color:var(--txt) !important;
+  border-color:transparent !important;
 }
-[data-testid="stSidebar"] .stRadio label[data-checked="true"],
-[data-testid="stSidebar"] .stRadio input:checked + div {
-  background:rgba(0,212,255,.09);
-  border-left-color:var(--a);
+/* Active nav button (type=primary) */
+[data-testid="stSidebar"] .stButton > button[kind="primary"] {
+  background:rgba(0,212,255,.09) !important;
+  border-left-color:var(--a) !important;
   color:var(--a) !important;
 }
-[data-testid="stSidebar"] [data-baseweb="radio"] > div:first-child {display:none;}
 
 /* Headings */
 h1, h2, h3, h4, h5, h6 {
@@ -399,7 +403,7 @@ hr, [data-testid="stDivider"] {
 
 /* --- Custom-rendered chrome (header/section/box/term) --- */
 .cx-header {
-  position:sticky; top:0; z-index:100;
+  position:relative; z-index:10;
   background:rgba(2,5,9,.97); backdrop-filter:blur(10px);
   border-bottom:1px solid var(--border);
   padding:8px 14px; margin:-1rem -1rem 14px -1rem;
@@ -839,50 +843,44 @@ def render_sidebar() -> str:
         mode = get_current_mode()
         if mode == OFFLINE_SAFE:
             st.markdown('<div class="cx-mode off">&#9679; OFFLINE SAFE</div>', unsafe_allow_html=True)
-            st.markdown('<div class="btn-red">', unsafe_allow_html=True)
-            if st.button("ENGAGE LIVE ANALYSIS", key="mode_to_live", use_container_width=True):
+            if st.button("🔴  ENGAGE LIVE ANALYSIS", key="mode_to_live", use_container_width=True):
                 set_mode(LIVE_ANALYSIS)
                 log_event("warn", "Switched to LIVE ANALYSIS mode")
                 st.rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
             groups = NAV_GROUPS_OFFLINE
         else:
             st.markdown('<div class="cx-mode live">&#9679; LIVE ANALYSIS</div>', unsafe_allow_html=True)
-            st.markdown('<div class="btn-green">', unsafe_allow_html=True)
-            if st.button("RETURN TO OFFLINE SAFE", key="mode_to_offline", use_container_width=True):
+            if st.button("🟢  RETURN TO OFFLINE SAFE", key="mode_to_offline", use_container_width=True):
                 set_mode(OFFLINE_SAFE)
                 log_event("ok", "Returned to OFFLINE SAFE mode")
                 st.rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
             groups = NAV_GROUPS_LIVE
 
-        # Flatten options, labelled with icons; keep mapping from label to page id.
-        labelled = []
-        label_to_page = {}
+        st.divider()
+
+        current = st.session_state.get("current_page", PAGE_SECURITY_LANDING)
+
         for group_name, pages in groups:
             st.markdown(f'<div class="cx-ns">{group_name}</div>', unsafe_allow_html=True)
-            options_in_group = []
             for p in pages:
                 icon = PAGE_ICONS.get(p, "")
                 label = f"{icon}  {p}"
-                labelled.append(label)
-                label_to_page[label] = p
-                options_in_group.append(label)
-            # Use a small radio per group so labels group cleanly.
-            current = st.session_state.get("current_page", PAGE_SECURITY_LANDING)
-            current_label = next((lbl for lbl, p in label_to_page.items() if p == current and lbl in options_in_group), None)
-            idx = options_in_group.index(current_label) if current_label else 0
-            chosen = st.radio(
-                group_name,
-                options_in_group,
-                index=idx if current_label else None,
-                key=f"nav_{group_name}",
-                label_visibility="collapsed",
-            )
-            if chosen and chosen != current_label and label_to_page[chosen] != current:
-                st.session_state["current_page"] = label_to_page[chosen]
+                btn_key = f"nav_btn_{p}"
+                is_active = (p == current)
 
-        st.markdown('<div class="cx-ns" style="margin-top:14px">SESSION</div>', unsafe_allow_html=True)
+                # Use type="primary" for the active page to visually highlight it
+                if st.button(
+                    label,
+                    key=btn_key,
+                    use_container_width=True,
+                    type="primary" if is_active else "secondary",
+                ):
+                    if not is_active:
+                        st.session_state["current_page"] = p
+                        st.rerun()
+
+        st.divider()
+        st.markdown('<div class="cx-ns">SESSION</div>', unsafe_allow_html=True)
         st.caption(f"Build 2026.05 / pid {id(st.session_state) % 99999}")
 
         return st.session_state.get("current_page", PAGE_SECURITY_LANDING)
