@@ -162,8 +162,52 @@ html, body, .stApp, [data-testid="stAppViewContainer"] {
   font-family:'Rajdhani', sans-serif !important;
 }
 
-[data-testid="stHeader"] {background:transparent !important;}
-[data-testid="stToolbar"] {display:none !important;}
+[data-testid="stHeader"] {
+  background:transparent !important;
+  z-index:999 !important;
+}
+/* Style the sidebar collapse button highly aggressively */
+[data-testid="stSidebarCollapseButton"] {
+  position: fixed !important;
+  color: var(--a) !important;
+  background: rgba(0, 212, 255, .15) !important;
+  border: 1px solid var(--a) !important;
+  border-radius: 4px !important;
+  top: 8px !important;
+  left: 8px !important;
+  z-index: 10000 !important;
+  display: block !important;
+  visibility: visible !important;
+  transition: transform .35s cubic-bezier(.4,0,.2,1),
+              background .25s ease,
+              box-shadow .25s ease,
+              border-color .25s ease !important;
+  animation: cx-toggle-pulse 2.5s ease-in-out infinite !important;
+}
+@keyframes cx-toggle-pulse {
+  0%, 100% { box-shadow: 0 0 6px rgba(0,212,255,.25); }
+  50%      { box-shadow: 0 0 14px rgba(0,212,255,.5), 0 0 4px rgba(0,255,157,.2); }
+}
+/* Counter-act the sidebar's collapse transform (-300px) by shifting the button back */
+[data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarCollapseButton"] {
+  transform: translateX(300px) !important;
+}
+/* Flip the arrow icon based on sidebar state */
+[data-testid="stSidebarCollapseButton"] svg {
+  transition: transform .3s cubic-bezier(.4,0,.2,1) !important;
+}
+[data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarCollapseButton"] svg {
+  transform: rotate(180deg) !important;
+}
+[data-testid="stSidebarCollapseButton"]:hover {
+  background: rgba(0,212,255,.35) !important;
+  box-shadow: 0 0 20px rgba(0,212,255,.5), 0 0 6px rgba(0,255,157,.3) !important;
+  border-color: var(--a2) !important;
+  animation: none !important;
+}
+
+/* Hide the "Made with Streamlit" menu but keep functionality */
+[data-testid="stToolbar"] {visibility:hidden !important;}
 footer {visibility:hidden;}
 #MainMenu {visibility:hidden;}
 
@@ -406,7 +450,7 @@ hr, [data-testid="stDivider"] {
   position:relative; z-index:10;
   background:rgba(2,5,9,.97); backdrop-filter:blur(10px);
   border-bottom:1px solid var(--border);
-  padding:8px 14px; margin:-1rem -1rem 14px -1rem;
+  padding:8px 14px 8px 60px; margin:0 -1rem 14px -1rem;
   display:flex; align-items:center; justify-content:space-between;
 }
 .cx-logo {
