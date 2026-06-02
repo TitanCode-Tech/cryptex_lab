@@ -33,3 +33,9 @@ dist/
 *.recovery_report.csv
 *.recovery_report.pdf
 wallet_recovery_report.*
+
+# Security keys & audit logs
+private_key.pem
+audit_logs/
+manifest.json
+

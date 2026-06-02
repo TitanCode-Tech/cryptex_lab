@@ -26,3 +26,7 @@ pytest==9.0.3
 
 # Live Mode Only - lazy-imported by live_utils.py; never loaded in OFFLINE SAFE mode.
 requests==2.31.0
+
+# Cryptography - for license signature verification and build integrity signing
+cryptography==48.0.0
+

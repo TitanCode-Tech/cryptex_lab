@@ -84,6 +84,23 @@ try:
 except ImportError:
     live_utils = None
 
+# Enterprise Security Imports & Helpers
+from audit import log_event as log_audit_event
+from license_utils import verify_license_data, check_module_access
+from integrity import verify_build_integrity
+
+def check_license() -> tuple[bool, str, dict]:
+    license_path = Path("license.json")
+    if not license_path.exists():
+        return False, "License file (license.json) is missing.", {}
+    try:
+        with open(license_path, "r", encoding="utf-8") as f:
+            license_dict = json.load(f)
+        return verify_license_data(license_dict, Path("public_key.pem"))
+    except Exception as e:
+        return False, f"Failed to read license: {str(e)}", {}
+
+
 
 # ---------------------------------------------------------------------------
 # Page constants
@@ -899,6 +916,35 @@ def render_sidebar() -> str:
                 log_event("ok", "Returned to OFFLINE SAFE mode")
                 st.rerun()
             groups = NAV_GROUPS_LIVE
+
+        st.divider()
+
+        # License Check & Visual Feedback
+        is_license_valid, err, license_data = check_license()
+        if is_license_valid:
+            client_name = license_data.get("client", "Authorized User")
+            st.markdown(f'<div class="cx-tag green" style="display:block; text-align:center; margin-bottom:10px; font-weight:bold;">🔑 LICENSE ACTIVE: {client_name}</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="cx-tag red" style="display:block; text-align:center; margin-bottom:10px; font-weight:bold;">🔒 LICENSE INACTIVE</div>', unsafe_allow_html=True)
+
+        # User Role Selection (RBAC)
+        if "user_role" not in st.session_state:
+            st.session_state["user_role"] = "Analyst"
+        
+        current_role = st.session_state["user_role"]
+        roles_list = ["Viewer", "Analyst", "Senior Analyst", "Admin"]
+        selected_role = st.selectbox(
+            "ROLE ASSIGNMENT",
+            roles_list,
+            index=roles_list.index(current_role),
+            key="user_role_selector_sidebar"
+        )
+        if selected_role != current_role:
+            st.session_state["user_role"] = selected_role
+            log_event("ok", f"Changed role to {selected_role}")
+            # Reset authorization since role changed
+            st.session_state["authorized_for_recovery"] = False
+            st.rerun()
 
         st.divider()
 
@@ -1828,6 +1874,18 @@ def page_airgap_guide():
         render_terminal("airgap :: protocol")
 
 
+def log_export(format_name: str) -> None:
+    auth_case = st.session_state.get("auth_case_id", "NO_CASE")
+    user_role = st.session_state.get("user_role", "Viewer")
+    log_audit_event(
+        case_id=auth_case,
+        module="exporter",
+        action=f"exported_report_{format_name}",
+        role=user_role,
+        mode=get_current_mode(),
+        export_actions=format_name
+    )
+
 def page_exporter():
     render_section_header("\U0001F4CA", "RECOVERY REPORT EXPORTER", "TXT / CSV / PDF / QR")
     addresses = st.session_state.get("last_derivations", [])
@@ -1862,6 +1920,8 @@ def page_exporter():
                     file_name="cryptex_report.txt",
                     mime="text/plain",
                     key="dl_txt",
+                    on_click=log_export,
+                    args=("TXT",),
                 )
             st.markdown("</div>", unsafe_allow_html=True)
         with bcol2:
@@ -1873,6 +1933,8 @@ def page_exporter():
                     file_name="cryptex_report.csv",
                     mime="text/csv",
                     key="dl_csv",
+                    on_click=log_export,
+                    args=("CSV",),
                 )
             st.markdown("</div>", unsafe_allow_html=True)
         with bcol3:
@@ -1886,6 +1948,8 @@ def page_exporter():
                         file_name="cryptex_report.pdf",
                         mime="application/pdf",
                         key="dl_pdf",
+                        on_click=log_export,
+                        args=("PDF",),
                     )
                 except Exception as e:
                     st.error(f"PDF build failed: {e}")
@@ -1900,10 +1964,19 @@ def page_exporter():
             try:
                 png = build_qr_png(addresses[idx]["address"], box_size=6)
                 st.image(png, caption=addresses[idx]["address"], width=240)
-                st.download_button("DOWNLOAD QR PNG", data=png, file_name="address_qr.png", mime="image/png", key="dl_qr")
+                st.download_button(
+                    "DOWNLOAD QR PNG",
+                    data=png,
+                    file_name="address_qr.png",
+                    mime="image/png",
+                    key="dl_qr",
+                    on_click=log_export,
+                    args=("QR_PNG",),
+                )
             except ValueError as e:
                 st.error(str(e))
             close_box()
+
     with col2:
         render_terminal("export :: report")
 
@@ -1992,7 +2065,6 @@ ROUTE = {
     PAGE_EDUCATION: page_education,
     PAGE_WIPE: page_wipe,
 }
-
 # Pages that require offline mode (locked when LIVE_ANALYSIS active).
 OFFLINE_LOCKED_PAGES = {
     PAGE_INCOMPLETE_SEED, PAGE_TYPO_LAB, PAGE_WRONG_ORDER,
@@ -2001,6 +2073,140 @@ OFFLINE_LOCKED_PAGES = {
     PAGE_RECOVERY_SELECTOR,
 }
 LIVE_LOCKED_PAGES = {PAGE_LIVE_ADDR, PAGE_LIVE_TX}
+
+# Role definitions for Role-Based Access Control (RBAC)
+ROLES = {
+    "Viewer": [
+        PAGE_SECURITY_LANDING, PAGE_CASE_MGMT, PAGE_EVIDENCE_HASH,
+        PAGE_ENTROPY, PAGE_HASH_TOOLS, PAGE_AIRGAP_GUIDE, PAGE_EDUCATION,
+        PAGE_WIPE, PAGE_LIVE_ADDR, PAGE_LIVE_TX
+    ],
+    "Analyst": [
+        PAGE_SECURITY_LANDING, PAGE_CASE_MGMT, PAGE_EVIDENCE_HASH,
+        PAGE_RECOVERY_SELECTOR, PAGE_BIP39_VALIDATION, PAGE_TYPO_LAB, PAGE_WRONG_ORDER,
+        PAGE_DERIVATION, PAGE_ADDRESS_MATCHER, PAGE_ADDRESS_GEN,
+        PAGE_ENTROPY, PAGE_HASH_TOOLS, PAGE_AIRGAP_GUIDE, PAGE_EDUCATION,
+        PAGE_WIPE, PAGE_EXPORTER, PAGE_LIVE_ADDR, PAGE_LIVE_TX
+    ],
+    "Senior Analyst": [
+        PAGE_SECURITY_LANDING, PAGE_CASE_MGMT, PAGE_EVIDENCE_HASH,
+        PAGE_RECOVERY_SELECTOR, PAGE_BIP39_VALIDATION, PAGE_INCOMPLETE_SEED, PAGE_TYPO_LAB, PAGE_WRONG_ORDER,
+        PAGE_PASSPHRASE, PAGE_DERIVATION, PAGE_ADDRESS_MATCHER, PAGE_ADDRESS_GEN,
+        PAGE_ENTROPY, PAGE_HASH_TOOLS, PAGE_VAULT_INSPECT, PAGE_AIRGAP_GUIDE, PAGE_EDUCATION,
+        PAGE_WIPE, PAGE_EXPORTER, PAGE_LIVE_ADDR, PAGE_LIVE_TX
+    ],
+    "Admin": [
+        PAGE_SECURITY_LANDING, PAGE_CASE_MGMT, PAGE_EVIDENCE_HASH,
+        PAGE_RECOVERY_SELECTOR, PAGE_BIP39_VALIDATION, PAGE_INCOMPLETE_SEED, PAGE_TYPO_LAB, PAGE_WRONG_ORDER,
+        PAGE_PASSPHRASE, PAGE_DERIVATION, PAGE_ADDRESS_MATCHER, PAGE_ADDRESS_GEN,
+        PAGE_ENTROPY, PAGE_HASH_TOOLS, PAGE_VAULT_INSPECT, PAGE_AIRGAP_GUIDE, PAGE_EDUCATION,
+        PAGE_WIPE, PAGE_EXPORTER, PAGE_LIVE_ADDR, PAGE_LIVE_TX
+    ]
+}
+
+# Mapping of pages to functional module boundaries defined in license_data.get("modules")
+PAGE_MODULE_MAP = {
+    PAGE_RECOVERY_SELECTOR: "recovery",
+    PAGE_BIP39_VALIDATION: "recovery",
+    PAGE_INCOMPLETE_SEED: "recovery",
+    PAGE_TYPO_LAB: "recovery",
+    PAGE_WRONG_ORDER: "recovery",
+    PAGE_PASSPHRASE: "recovery",
+    PAGE_DERIVATION: "recovery",
+    PAGE_ADDRESS_MATCHER: "recovery",
+    PAGE_ADDRESS_GEN: "recovery",
+    PAGE_VAULT_INSPECT: "forensic",
+    PAGE_CASE_MGMT: "forensic",
+    PAGE_EVIDENCE_HASH: "forensic",
+    PAGE_EXPORTER: "reports",
+}
+
+def page_license_activation(err_msg: str) -> None:
+    render_section_header("🔑", "LICENSE ACTIVATION REQUIRED", "OFFLINE VERIFICATION SYSTEM")
+    
+    st.error(f"Application Inactive: {err_msg}")
+    st.info("Please upload a valid signed license file (`license.json`) to activate Cryptex Lab.")
+    
+    uploaded_file = st.file_uploader("Upload license.json", type=["json"])
+    if uploaded_file is not None:
+        try:
+            content = json.load(uploaded_file)
+            is_valid, verify_err, data = verify_license_data(content, Path("public_key.pem"))
+            if is_valid:
+                with open("license.json", "w", encoding="utf-8") as f:
+                    json.dump(content, f, indent=2)
+                st.success("License activated successfully! Reloading...")
+                st.rerun()
+            else:
+                st.error(f"Invalid License: {verify_err}")
+        except Exception as e:
+            st.error(f"Error parsing file: {e}")
+            
+    st.markdown("### Or paste license JSON contents:")
+    paste_content = st.text_area("License JSON", height=200)
+    if st.button("ACTIVATE LICENSE"):
+        if paste_content:
+            try:
+                content = json.loads(paste_content)
+                is_valid, verify_err, data = verify_license_data(content, Path("public_key.pem"))
+                if is_valid:
+                    with open("license.json", "w", encoding="utf-8") as f:
+                        json.dump(content, f, indent=2)
+                    st.success("License activated successfully! Reloading...")
+                    st.rerun()
+                else:
+                    st.error(f"Invalid License: {verify_err}")
+            except Exception as e:
+                st.error(f"Error parsing JSON: {e}")
+        else:
+            st.warning("Please paste license contents.")
+
+def render_authorization_workflow(target_page: str) -> None:
+    render_section_header("⚠️", "PROCEDURAL AUTHORIZATION REQUIRED", "FORENSIC WORKSTATION AUDIT GATE")
+    
+    open_box("AUTHORIZATION FORM")
+    
+    st.warning("You are attempting to access a recovery or forensic tool. To maintain procedural accountability, you must acknowledge authorization.")
+    
+    active_case = get_active_case()
+    active_case_id = active_case["id"] if active_case else ""
+    
+    with st.form("authorization_acknowledgement_form"):
+        case_id = st.text_input("CASE ID", value=active_case_id, placeholder="e.g. CASE-001")
+        notes = st.text_area("AUTHORIZATION NOTES / JUSTIFICATION", placeholder="Explain the legal basis or written authorization details...")
+        
+        authorized_check = st.checkbox(
+            "I confirm I own this wallet or have written authorization from the owner to perform recovery operations."
+        )
+        
+        submitted = st.form_submit_button("SUBMIT AUTHORIZATION & ENGAGE TOOL")
+        if submitted:
+            if not case_id:
+                st.error("Error: Case ID is required.")
+            elif not notes:
+                st.error("Error: Authorization notes/justification is required.")
+            elif not authorized_check:
+                st.error("Error: You must check the authorization confirmation checkbox.")
+            else:
+                # Mark as authorized
+                st.session_state["authorized_for_recovery"] = True
+                st.session_state["auth_case_id"] = case_id
+                
+                # Log the event to audit log and terminal
+                user_role = st.session_state.get("user_role", "Viewer")
+                log_audit_event(
+                    case_id=case_id,
+                    module=target_page,
+                    action="authorization_granted",
+                    role=user_role,
+                    mode=get_current_mode()
+                )
+                
+                log_event("ok", f"Authorized recovery tools for Case {case_id}")
+                st.success("Authorization confirmed. Loading tool...")
+                st.rerun()
+                
+    close_box()
 
 
 def main() -> None:
@@ -2014,12 +2220,50 @@ def main() -> None:
     init_case_registry()
     inject_cryptex_css()
 
+    # 1. Build Integrity Verification
+    integrity_ok, integrity_err = verify_build_integrity()
+    if not integrity_ok:
+        st.error("🚨 CRITICAL: CRYPTEX LAB Build Integrity Check Failed!")
+        st.info(f"Detail: {integrity_err}")
+        st.warning("The application files appear to have been modified or corrupted. For safety, execution has been halted. Please check manifest.json or contact Titan Code support.")
+        st.stop()
+
+    # 2. License Verification
+    is_license_valid, license_err, license_data = check_license()
+    if not is_license_valid:
+        render_header()
+        page_license_activation(license_err)
+        return
+
     if "current_page" not in st.session_state:
         st.session_state["current_page"] = PAGE_SECURITY_LANDING
 
     page = render_sidebar()
     render_header()
     render_active_case_banner()
+
+    # 3. RBAC (Role-Based Access Control) Page Access Check
+    user_role = st.session_state.get("user_role", "Viewer")
+    allowed_pages = ROLES.get(user_role, ROLES["Viewer"])
+    if page not in allowed_pages:
+        st.error(f"Access Denied: Role '{user_role}' is not authorized to access '{page}'.")
+        log_event("warn", f"Access denied to '{page}' for role '{user_role}'")
+        return
+
+    # License module-level access check
+    required_module = PAGE_MODULE_MAP.get(page)
+    if required_module:
+        if not check_module_access(license_data, required_module):
+            st.error(f"License Restriction: Current license does not permit access to the '{required_module}' module.")
+            st.info("Please contact Titan Code support to obtain access.")
+            log_event("warn", f"License check failed for module '{required_module}'")
+            return
+
+    # 4. Authorization Workflow acknowledgement check
+    if page in OFFLINE_LOCKED_PAGES:
+        if not st.session_state.get("authorized_for_recovery", False):
+            render_authorization_workflow(page)
+            return
 
     # Security guards: redirect to landing if user picks a locked page.
     if is_live() and page in OFFLINE_LOCKED_PAGES:
@@ -2038,6 +2282,16 @@ def main() -> None:
 
     handler = ROUTE.get(page)
     if handler:
+        # Log module usage to the audit log if authorized
+        if page in OFFLINE_LOCKED_PAGES or required_module == "forensic":
+            auth_case = st.session_state.get("auth_case_id", "NO_CASE")
+            log_audit_event(
+                case_id=auth_case,
+                module=page,
+                action="accessed_module",
+                role=user_role,
+                mode=get_current_mode()
+            )
         handler()
     else:
         st.error(f"Unknown page: {page}")
