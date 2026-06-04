@@ -36,7 +36,8 @@ CLIENT_FILES = [
     "update.py",
     "manifest.json",
     "public_key.pem",
-    "license.json"
+    "license.json",
+    "TUTORIAL_CLIENT.md"
 ]
 
 CLIENT_DIRS = [
@@ -50,7 +51,8 @@ DEVELOPER_ONLY_FILES = [
     "implementation_plan.md",
     "task.md",
     "package.py",
-    ".gitignore"
+    ".gitignore",
+    "TUTORIAL_DEVELOPER.md"
 ]
 
 DEVELOPER_ONLY_DIRS = [
