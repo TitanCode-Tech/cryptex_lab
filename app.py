@@ -49,6 +49,7 @@ from recovery_utils import (
     suggest_typo_corrections,
     recover_word_order,
     test_passphrase,
+    estimate_recovery_time,
     MAX_MISSING_WORDS,
     MAX_ORDER_POSITIONS,
 )
@@ -1259,33 +1260,433 @@ def page_recovery_selector():
 
 
 def page_bip39_validation():
-    render_section_header("\U0001F510", "BIP39 VALIDATION LAB", "WORDLIST + CHECKSUM")
-    col1, col2 = st.columns([3, 2])
-    with col1:
-        open_box("MNEMONIC VALIDATOR", live=True)
-        mnemonic = st.text_area("Mnemonic (12/15/18/21/24 words)", key="bip39_in", height=110)
-        if _btn("VALIDATE PHRASE", key="bip39_run", variant="green"):
-            if not mnemonic.strip():
-                st.warning("Provide a mnemonic phrase.")
-            else:
-                report = validate_mnemonic(mnemonic)
-                color = "rv" if report["valid"] else "rr"
-                render_rblock([
-                    ("WORD COUNT", str(report["word_count"]), "ra"),
-                    ("WORD COUNT VALID", str(report["word_count_valid"]), "rv" if report["word_count_valid"] else "rr"),
-                    ("WORDS IN BIP39 LIST", str(report["words_in_wordlist"]), "rv" if report["words_in_wordlist"] else "rr"),
-                    ("CHECKSUM VALID", str(report["checksum_valid"]), "rv" if report["checksum_valid"] else "rr"),
-                    ("OVERALL VALID", str(report["valid"]), color),
-                ])
-                if report["valid"]:
-                    log_event("ok", "Mnemonic validated (all checks pass)")
-                    st.success("Mnemonic is a valid BIP39 phrase.")
+    render_section_header("\U0001F510", "BIP39 VALIDATION LAB", "VALIDATION & WORKSPACE LABORATORY")
+    tab1, tab2, tab3 = st.tabs(["🔍 MNEMONIC VALIDATOR", "🧪 SIMULATED DAMAGE WORKSPACE", "🛡️ RECOVERY VALIDATION PROOF"])
+    
+    with tab1:
+        col1, col2 = st.columns([3, 2])
+        with col1:
+            open_box("MNEMONIC VALIDATOR", live=True)
+            mnemonic = st.text_area("Mnemonic (12/15/18/21/24 words)", key="bip39_in", height=110)
+            if _btn("VALIDATE PHRASE", key="bip39_run", variant="green"):
+                if not mnemonic.strip():
+                    st.warning("Provide a mnemonic phrase.")
                 else:
-                    log_event("warn", "Mnemonic validation failed")
-                    st.error("Mnemonic did not pass all BIP39 checks.")
-        close_box()
-    with col2:
-        render_terminal("bip39 :: validator")
+                    report = validate_mnemonic(mnemonic)
+                    color = "rv" if report["valid"] else "rr"
+                    render_rblock([
+                        ("WORD COUNT", str(report["word_count"]), "ra"),
+                        ("WORD COUNT VALID", str(report["word_count_valid"]), "rv" if report["word_count_valid"] else "rr"),
+                        ("WORDS IN BIP39 LIST", str(report["words_in_wordlist"]), "rv" if report["words_in_wordlist"] else "rr"),
+                        ("CHECKSUM VALID", str(report["checksum_valid"]), "rv" if report["checksum_valid"] else "rr"),
+                        ("OVERALL VALID", str(report["valid"]), color),
+                    ])
+                    if report["valid"]:
+                        log_event("ok", "Mnemonic validated (all checks pass)")
+                        st.success("Mnemonic is a valid BIP39 phrase.")
+                    else:
+                        log_event("warn", "Mnemonic validation failed")
+                        st.error("Mnemonic did not pass all BIP39 checks.")
+            close_box()
+        with col2:
+            render_terminal("bip39 :: validator")
+            
+    with tab2:
+        col1, col2 = st.columns([3, 2])
+        with col1:
+            open_box("TEST WALLET GENERATOR", live=True)
+            st.markdown(
+                "Generate a clean, valid BIP39 test mnemonic to simulate damages and demonstrate "
+                "how the forensic recovery engine works."
+            )
+            
+            wcount = st.radio("WORDS COUNT", [12, 24], index=0, horizontal=True, key="lab_wcount")
+            
+            if _btn("GENERATE TEST WALLET", key="lab_gen_btn", variant="green"):
+                from bip_utils import Bip39MnemonicGenerator, Bip39WordsNum
+                num = Bip39WordsNum.WORDS_NUM_12 if wcount == 12 else Bip39WordsNum.WORDS_NUM_24
+                gen_mnemonic = Bip39MnemonicGenerator().FromWordsNumber(num)
+                
+                # Derive ETH and BTC addresses
+                eth_addr = derive_eth_addresses(gen_mnemonic, count=1)[0]["address"]
+                btc_addr = derive_btc_addresses(gen_mnemonic, address_type="native_segwit", count=1)[0]["address"]
+                
+                st.session_state["val_mnemonic"] = gen_mnemonic
+                st.session_state["val_eth_addr"] = eth_addr
+                st.session_state["val_btc_addr"] = btc_addr
+                
+                # Clear any simulated state
+                st.session_state["val_damaged_mnemonic"] = None
+                st.session_state["val_shuffled_template"] = None
+                st.session_state["val_shuffled_pool"] = None
+                
+                log_event("ok", f"Generated test wallet ({wcount} words)")
+                st.success("Test wallet successfully generated in volatile session state.")
+                
+            if st.session_state.get("val_mnemonic"):
+                st.markdown("#### GENERATED MNEMONIC")
+                st.code(st.session_state["val_mnemonic"], language="text")
+                
+                st.markdown("#### DERIVED PUBLIC ADDRESSES")
+                st.markdown(
+                    f"**ETH Address (BIP44)**: `{st.session_state['val_eth_addr']}`\n\n"
+                    f"**BTC Address (BIP84)**: `{st.session_state['val_btc_addr']}`"
+                )
+            close_box()
+            
+            # SIMULATION CONTROLS
+            if st.session_state.get("val_mnemonic"):
+                open_box("SIMULATION CONTROLS", live=True)
+                sim_col1, sim_col2 = st.columns(2)
+                
+                with sim_col1:
+                    st.markdown("##### MISSING WORD SIMULATOR")
+                    words_to_remove = st.selectbox("Words to remove", [1, 2], index=0, key="lab_remove_count")
+                    
+                    if _btn("SIMULATE WORD LOSS", key="lab_loss_btn", variant="orange", use_container_width=True):
+                        import random
+                        orig_words = st.session_state["val_mnemonic"].split()
+                        total_words = len(orig_words)
+                        indices = random.sample(range(total_words), words_to_remove)
+                        
+                        damaged_words = list(orig_words)
+                        for idx in indices:
+                            damaged_words[idx] = "?"
+                            
+                        st.session_state["val_damaged_mnemonic"] = " ".join(damaged_words)
+                        # Clear alternative simulation
+                        st.session_state["val_shuffled_template"] = None
+                        st.session_state["val_shuffled_pool"] = None
+                        
+                        log_event("warn", f"Simulated loss of {words_to_remove} word(s) at positions: {[i+1 for i in indices]}")
+                        st.success(f"Simulated loss of {words_to_remove} word(s). See Demonstration Workspace below.")
+                        
+                with sim_col2:
+                    st.markdown("##### SHUFFLE SIMULATOR")
+                    locked_pos = st.number_input("Locked words (prefix positions)", 0, wcount - 2, value=4 if wcount == 12 else 16, key="lab_lock_count")
+                    
+                    if _btn("SIMULATE WORD SHUFFLE", key="lab_shuffle_btn", variant="orange", use_container_width=True):
+                        import random
+                        orig_words = st.session_state["val_mnemonic"].split()
+                        locked = orig_words[:locked_pos]
+                        to_shuffle = orig_words[locked_pos:]
+                        
+                        shuffled_pool = list(to_shuffle)
+                        random.shuffle(shuffled_pool)
+                        
+                        template_words = list(locked) + ["?"] * len(to_shuffle)
+                        template_phrase = " ".join(template_words)
+                        
+                        st.session_state["val_shuffled_template"] = template_phrase
+                        st.session_state["val_shuffled_pool"] = shuffled_pool
+                        # Clear alternative simulation
+                        st.session_state["val_damaged_mnemonic"] = None
+                        
+                        log_event("warn", f"Simulated shuffle of last {len(to_shuffle)} words with first {locked_pos} words locked")
+                        st.success("Simulated shuffle. See Demonstration Workspace below.")
+                close_box()
+                
+            # DEMONSTRATION WORKSPACE
+            if st.session_state.get("val_damaged_mnemonic") or st.session_state.get("val_shuffled_template"):
+                open_box("FORENSIC RECOVERY WORKSPACE", live=True)
+                
+                if st.session_state.get("val_damaged_mnemonic"):
+                    st.markdown("#### DAMAGED MNEMONIC")
+                    st.code(st.session_state["val_damaged_mnemonic"], language="text")
+                    
+                    st.markdown(
+                        f"**Target Address (ETH)**: `{st.session_state['val_eth_addr']}`\n\n"
+                        "*The recovery engine will search all candidate words and perform derivation matching to find the original mnemonic.*"
+                    )
+                    
+                    if _btn("RUN LAB RECOVERY", key="lab_recovery_missing_btn", variant="purple", use_container_width=True):
+                        progress_bar = st.progress(0.0)
+                        status_text = st.empty()
+                        
+                        def cb(checked, total, found):
+                            pct = min(1.0, float(checked) / total)
+                            progress_bar.progress(pct)
+                            status_text.markdown(
+                                f"**Checked**: {checked:,} / {total:,} ({pct*100:.1f}%) | **Candidates Found**: {found}"
+                            )
+                            
+                        phrase = st.session_state["val_damaged_mnemonic"]
+                        target_addr = st.session_state["val_eth_addr"]
+                        
+                        log_event("info", "Starting lab recovery for missing words...")
+                        with st.spinner("Brute-forcing missing slots..."):
+                            res = recover_missing_words(
+                                phrase,
+                                target_address=target_addr,
+                                max_unknowns=MAX_MISSING_WORDS,
+                                progress_callback=cb,
+                            )
+                            
+                        # Show stats
+                        st.markdown("##### Recovery Stats")
+                        render_status_cards([
+                            ("CHECKED", f"{res['checked']:,}", ""),
+                            ("CHECKSUM PASSED", f"{res['checksum_passed']:,}", "green"),
+                            ("SPEED", f"{int(res['checked'] / (res['elapsed_time'] or 0.001)):,} keys/s", ""),
+                            ("ELAPSED", f"{res['elapsed_time']:.2f}s", ""),
+                        ])
+                        
+                        if res["candidates"]:
+                            recovered = res["candidates"][0]
+                            st.markdown("##### RECOVERED MNEMONIC")
+                            st.code(recovered, language="text")
+                            
+                            if recovered == st.session_state["val_mnemonic"]:
+                                log_event("ok", "Mnemonic recovered successfully and matches original!")
+                                st.balloons()
+                                st.success("✅ MATCH SUCCESS: The original mnemonic was successfully reconstructed and verified against the target address!")
+                            else:
+                                st.warning("Recovered a checksum-valid mnemonic, but it does not match the original phrase.")
+                        else:
+                            st.error("Recovery failed: No candidates produced matching the target address.")
+                            
+                elif st.session_state.get("val_shuffled_template"):
+                    st.markdown("#### SHUFFLED TEMPLATE")
+                    st.code(st.session_state["val_shuffled_template"], language="text")
+                    
+                    st.markdown(
+                        f"**Word Pool**: `{', '.join(st.session_state['val_shuffled_pool'])}`\n\n"
+                        f"**Target Address (ETH)**: `{st.session_state['val_eth_addr']}`"
+                    )
+                    
+                    # Permutations
+                    shuffled_words = st.session_state["val_shuffled_pool"]
+                    counts = Counter(shuffled_words)
+                    search_space = math.factorial(len(shuffled_words))
+                    for c in counts.values():
+                        search_space //= math.factorial(c)
+                        
+                    st.markdown("### Feasibility Assessment")
+                    report_html = render_feasibility_report(search_space, True, len(st.session_state["val_shuffled_pool"]) + st.session_state.get("lab_lock_count", 0))
+                    st.markdown(report_html, unsafe_allow_html=True)
+                    
+                    is_feasible = search_space <= 5_000_000
+                    if is_feasible:
+                        if _btn("RUN LAB RECOVERY", key="lab_recovery_order_btn", variant="purple", use_container_width=True):
+                            progress_bar = st.progress(0.0)
+                            status_text = st.empty()
+                            
+                            def cb(checked, total, found):
+                                pct = min(1.0, float(checked) / total)
+                                progress_bar.progress(pct)
+                                status_text.markdown(
+                                    f"**Checked**: {checked:,} / {total:,} ({pct*100:.1f}%) | **Candidates Found**: {found}"
+                                )
+                                
+                            template = st.session_state["val_shuffled_template"]
+                            pool_list = st.session_state["val_shuffled_pool"]
+                            target_addr = st.session_state["val_eth_addr"]
+                            
+                            log_event("info", "Starting lab recovery for shuffled words...")
+                            with st.spinner("Permuting shuffled words..."):
+                                res = recover_word_order(
+                                    template,
+                                    pool_list,
+                                    target_address=target_addr,
+                                    progress_callback=cb,
+                                )
+                                
+                            # Show stats
+                            st.markdown("##### Recovery Stats")
+                            render_status_cards([
+                                ("CHECKED", f"{res['checked']:,}", ""),
+                                ("CHECKSUM PASSED", f"{res['checksum_passed']:,}", "green"),
+                                ("SPEED", f"{int(res['checked'] / (res['elapsed_time'] or 0.001)):,} keys/s", ""),
+                                ("ELAPSED", f"{res['elapsed_time']:.2f}s", ""),
+                            ])
+                            
+                            if res["candidates"]:
+                                recovered = res["candidates"][0]
+                                st.markdown("##### RECOVERED MNEMONIC")
+                                st.code(recovered, language="text")
+                                
+                                if recovered == st.session_state["val_mnemonic"]:
+                                    log_event("ok", "Shuffled mnemonic recovered successfully and matches original!")
+                                    st.balloons()
+                                    st.success("✅ MATCH SUCCESS: The original word order was successfully reconstructed and verified against the target address!")
+                                else:
+                                    st.warning("Recovered a checksum-valid mnemonic, but it does not match the original phrase.")
+                            else:
+                                st.error("Recovery failed: No candidates produced matching the target address.")
+                    else:
+                        st.warning("⚠️ Permutation search space is infeasible. Please generate a new test wallet with more locked prefix positions.")
+                close_box()
+                
+            with tab3:
+                col1, col2 = st.columns([3, 2])
+                with col1:
+                    open_box("AUTOMATED RECOVERY PROOF", live=True)
+                    st.markdown(
+                        "Run an automated verification cycle that generates a fresh valid BIP39 test wallet, "
+                        "simulates word loss or shuffling, executes the recovery engine, and mathematically "
+                        "proves successful recovery."
+                    )
+                    
+                    proof_wcount = st.radio("MNEMONIC TYPE", [12, 24], index=0, horizontal=True, key="proof_wcount")
+                    proof_scenario = st.selectbox(
+                        "DAMAGE SCENARIO",
+                        [
+                            "1 Missing Word (Fast)",
+                            "2 Missing Words (Moderate)",
+                            "Shuffled Word Order (4 Shuffled, 8/20 Locked)"
+                        ],
+                        key="proof_scenario"
+                    )
+                    proof_address_filter = st.checkbox("Enable Address Matching Filter", value=True, key="proof_addr_filter")
+                    
+                    if _btn("RUN RECOVERY PROOF", key="proof_run_btn", variant="purple", use_container_width=True):
+                        # 1. Generate test wallet
+                        from bip_utils import Bip39MnemonicGenerator, Bip39WordsNum
+                        num = Bip39WordsNum.WORDS_NUM_12 if proof_wcount == 12 else Bip39WordsNum.WORDS_NUM_24
+                        orig_mnemonic = Bip39MnemonicGenerator().FromWordsNumber(num)
+                        
+                        # Derive target address
+                        eth_addr = derive_eth_addresses(orig_mnemonic, count=1)[0]["address"]
+                        target_addr = eth_addr if proof_address_filter else None
+                        
+                        st.markdown("#### Generated Test Wallet")
+                        st.code(orig_mnemonic, language="text")
+                        st.markdown(f"**Target ETH Address (BIP44)**: `{eth_addr}`")
+                        
+                        # 2. Simulate damage/shuffle
+                        st.markdown("#### Simulated Damage Template")
+                        
+                        words = orig_mnemonic.split()
+                        if "1 Missing Word" in proof_scenario:
+                            import random
+                            idx = random.randint(0, len(words) - 1)
+                            damaged_words = list(words)
+                            damaged_words[idx] = "?"
+                            damaged_phrase = " ".join(damaged_words)
+                            st.code(damaged_phrase, language="text")
+                            
+                            st.markdown("#### Executing Missing Word Recovery...")
+                            progress_bar = st.progress(0.0)
+                            status_text = st.empty()
+                            
+                            def cb(checked, total, found):
+                                pct = min(1.0, float(checked) / total)
+                                progress_bar.progress(pct)
+                                status_text.markdown(f"**Checked**: {checked:,} / {total:,} ({pct*100:.1f}%) | **Candidates Found**: {found}")
+                                
+                            log_event("info", f"Proof: starting missing word recovery (1 missing)")
+                            with st.spinner("Recovering..."):
+                                res = recover_missing_words(
+                                    damaged_phrase,
+                                    target_address=target_addr,
+                                    max_unknowns=1,
+                                    progress_callback=cb
+                                )
+                                
+                        elif "2 Missing Words" in proof_scenario:
+                            import random
+                            indices = random.sample(range(len(words)), 2)
+                            damaged_words = list(words)
+                            for idx in indices:
+                                damaged_words[idx] = "?"
+                            damaged_phrase = " ".join(damaged_words)
+                            st.code(damaged_phrase, language="text")
+                            
+                            st.markdown("#### Executing Missing Words Recovery...")
+                            progress_bar = st.progress(0.0)
+                            status_text = st.empty()
+                            
+                            def cb(checked, total, found):
+                                pct = min(1.0, float(checked) / total)
+                                progress_bar.progress(pct)
+                                status_text.markdown(f"**Checked**: {checked:,} / {total:,} ({pct*100:.1f}%) | **Candidates Found**: {found}")
+                                
+                            log_event("info", f"Proof: starting missing words recovery (2 missing)")
+                            with st.spinner("Recovering..."):
+                                res = recover_missing_words(
+                                    damaged_phrase,
+                                    target_address=target_addr,
+                                    max_unknowns=2,
+                                    progress_callback=cb
+                                )
+                                
+                        else: # Shuffled word order
+                            import random
+                            locked_pos = 8 if proof_wcount == 12 else 20
+                            locked = words[:locked_pos]
+                            to_shuffle = words[locked_pos:]
+                            
+                            shuffled_pool = list(to_shuffle)
+                            random.shuffle(shuffled_pool)
+                            
+                            template_phrase = " ".join(list(locked) + ["?"] * len(to_shuffle))
+                            st.code(template_phrase, language="text")
+                            st.markdown(f"**Word Pool**: `{', '.join(shuffled_pool)}`")
+                            
+                            # Estimate search space
+                            from collections import Counter
+                            import math
+                            counts = Counter(shuffled_pool)
+                            search_space = math.factorial(len(shuffled_pool))
+                            for c in counts.values():
+                                search_space //= math.factorial(c)
+                                
+                            st.markdown("#### Executing Order Recovery...")
+                            progress_bar = st.progress(0.0)
+                            status_text = st.empty()
+                            
+                            def cb(checked, total, found):
+                                pct = min(1.0, float(checked) / total)
+                                progress_bar.progress(pct)
+                                status_text.markdown(f"**Checked**: {checked:,} / {total:,} ({pct*100:.1f}%) | **Candidates Found**: {found}")
+                                
+                            log_event("info", f"Proof: starting order recovery ({search_space} permutations)")
+                            with st.spinner("Recovering..."):
+                                res = recover_word_order(
+                                    template_phrase,
+                                    shuffled_pool,
+                                    target_address=target_addr,
+                                    progress_callback=cb
+                                )
+                                
+                        # 3. Report & Validate
+                        st.markdown("#### Recovery Stats")
+                        render_status_cards([
+                            ("CHECKED", f"{res['checked']:,}", ""),
+                            ("CHECKSUM PASSED", f"{res['checksum_passed']:,}", "green"),
+                            ("SPEED", f"{int(res['checked'] / (res['elapsed_time'] or 0.001)):,} keys/s", ""),
+                            ("ELAPSED", f"{res['elapsed_time']:.2f}s", ""),
+                        ])
+                        
+                        if res["candidates"]:
+                            recovered = res["candidates"][0]
+                            matched = False
+                            for cand in res["candidates"]:
+                                if cand == orig_mnemonic:
+                                    matched = True
+                                    recovered = cand
+                                    break
+                                    
+                            if matched:
+                                log_event("ok", f"Proof successful: recovered mnemonic matches original!")
+                                st.balloons()
+                                st.success(
+                                    f"✅ PROOF VERIFIED SUCCESSFUL!\n\n"
+                                    f"**Original**: `{orig_mnemonic}`\n\n"
+                                    f"**Recovered**: `{recovered}`\n\n"
+                                    f"The recovery engine successfully reconstructed the mnemonic and verified it against the target address."
+                                )
+                            else:
+                                st.warning(
+                                    f"⚠️ Checksum-valid candidate found, but does not match original.\n\n"
+                                    f"**Original**: `{orig_mnemonic}`\n\n"
+                                    f"**Recovered First**: `{recovered}`"
+                                )
+                        else:
+                            st.error("❌ PROOF FAILED: No candidates could be reconstructed.")
+                close_box()
+        with col2:
+            render_terminal("bip39 :: proof")
 
 
 def page_incomplete_seed():
@@ -1304,7 +1705,7 @@ def page_incomplete_seed():
 
         render_status_cards([
             ("UNKNOWN WORDS", str(unknowns_in_input), "orange" if unknowns_in_input else ""),
-            ("ENGINE", "OFFLINE", "green"),
+            ("ENGINE", "OFFLINE (MULTIPROCESSING)", "green"),
             ("MAX UNKNOWNS", str(MAX_MISSING_WORDS), ""),
             ("CHECKED", str(st.session_state.get("inc_last_checked", 0)), "" ),
         ])
@@ -1317,22 +1718,67 @@ def page_incomplete_seed():
                 log_event("err", f"Refused recovery: {unknowns_in_input} > {MAX_MISSING_WORDS}")
             else:
                 target_arg = target.strip() or None
-                with st.spinner(f"Iterating {2048 ** unknowns_in_input:,} candidate combinations..."):
+                search_space = 2048 ** unknowns_in_input
+                
+                # Check for misspellings in known words
+                try:
+                    from wallet_utils import _english_wordlist, _normalize_mnemonic
+                    words = _normalize_mnemonic(phrase).split()
+                    wordlist = _english_wordlist()
+                    known = [w for w in words if w != "?"]
+                    invalid_words = [w for w in known if w not in wordlist]
+                    if invalid_words:
+                        st.error(f"Non-'?' tokens contain words not in the BIP39 English wordlist: {', '.join(invalid_words)}. Run Typo Correction Lab first.")
+                        log_event("err", f"Refused recovery due to invalid words: {', '.join(invalid_words)}")
+                        return
+                except Exception as e:
+                    pass
+
+                # Display estimated runtime
+                est_time = estimate_recovery_time(search_space, target_arg is not None, len(phrase.split()))
+                st.info(f"Calculated Search Space: {search_space:,} combinations. Estimated Runtime: {est_time:.2f} seconds.")
+                
+                progress_bar = st.progress(0.0)
+                status_text = st.empty()
+                
+                def update_progress(checked, total, found):
+                    pct = min(1.0, float(checked) / total)
+                    progress_bar.progress(pct)
+                    status_text.markdown(
+                        f"**Checked**: {checked:,} / {total:,} ({pct*100:.1f}%) | "
+                        f"**Candidates Found**: {found}"
+                    )
+
+                log_event("info", f"Starting multiprocessing recovery for {unknowns_in_input} unknown(s)...")
+                
+                with st.spinner("Executing candidate search..."):
                     try:
                         result = recover_missing_words(
                             phrase,
                             target_address=target_arg,
                             max_unknowns=MAX_MISSING_WORDS,
+                            progress_callback=update_progress,
                         )
                     except ValueError as e:
                         log_event("err", f"Recovery error: {e}")
                         st.error(str(e))
                         return
+                        
                 st.session_state["inc_last_checked"] = result["checked"]
                 cand = result["candidates"]
+                
+                # Transparency Statistics
+                st.markdown("### Recovery Metrics")
+                render_status_cards([
+                    ("TOTAL CHECKED", f"{result['checked']:,}", ""),
+                    ("CHECKSUM PASSED", f"{result['checksum_passed']:,}", "green"),
+                    ("CHECKSUM FILTERED", f"{result['checked'] - result['checksum_passed']:,}", "orange"),
+                    ("SPEED", f"{int(result['checked'] / (result['elapsed_time'] or 0.001)):,} keys/s", ""),
+                ])
+                
                 if cand:
-                    log_event("ok", f"Recovered {len(cand)} candidate(s) in {result['checked']:,} checks")
-                    st.success(f"Found {len(cand)} candidate phrase(s).")
+                    log_event("ok", f"Recovered {len(cand)} candidate(s) in {result['elapsed_time']:.2f}s")
+                    st.success(f"Found {len(cand)} candidate phrase(s) in {result['elapsed_time']:.2f} seconds.")
                     st.session_state["recovery_candidates"] = cand
                     for c in cand[:10]:
                         st.code(c, language="text")
@@ -1381,50 +1827,216 @@ def page_typo_lab():
         render_terminal("recovery :: typo")
 
 
+def render_feasibility_report(search_space: int, target_address_provided: bool, word_count: int) -> str:
+    import multiprocessing
+    import math
+    from recovery_utils import estimate_recovery_time
+    
+    est_time = estimate_recovery_time(search_space, target_address_provided, word_count)
+    cores = multiprocessing.cpu_count()
+    
+    limit = 5_000_000
+    is_feasible = search_space <= limit
+    
+    if is_feasible:
+        status_title = "🟢 FEASIBLE"
+        status_color = "#00e676"  # neon green
+        status_bg = "rgba(0, 230, 118, 0.05)"
+        status_desc = "The search space is within safe operational limits. Multiprocessing will execute the search efficiently."
+    else:
+        status_title = "🔴 INFEASIBLE"
+        status_color = "#ff1744"  # neon red
+        status_bg = "rgba(255, 23, 68, 0.05)"
+        status_desc = f"Search space exceeds the maximum safe operational limit of {limit:,} permutations. Execution is blocked to prevent crash/hang. Please lock more positions in the template phrase."
+        
+    if est_time < 0.1:
+        time_str = "Instantaneous"
+    elif est_time < 60:
+        time_str = f"{est_time:.2f} seconds"
+    elif est_time < 3600:
+        time_str = f"{est_time / 60:.1f} minutes"
+    elif est_time < 86400:
+        time_str = f"{est_time / 3600:.1f} hours"
+    else:
+        time_str = f"{est_time / 86400:.1f} days"
+        
+    checksum_bits = word_count // 3
+    checksum_ratio = 100.0 / (2 ** checksum_bits)
+    
+    log_space = math.log10(max(1, search_space))
+    log_limit = math.log10(limit)
+    max_log = max(8.7, log_space)
+    pct = min(100.0, (log_space / max_log) * 100)
+    limit_pct = (log_limit / max_log) * 100
+    
+    report_html = f"""
+    <div style="
+        border: 1px solid {status_color};
+        background-color: {status_bg};
+        padding: 15px;
+        border-radius: 4px;
+        margin-bottom: 20px;
+        font-family: 'Share Tech Mono', monospace;
+    ">
+        <div style="font-size: 16px; font-weight: bold; color: {status_color}; display: flex; justify-content: space-between;">
+            <span>🛡️ RECOVERY FEASIBILITY REPORT</span>
+            <span>{status_title}</span>
+        </div>
+        <div style="font-size: 12px; color: #aaa; margin-top: 5px; margin-bottom: 15px;">
+            {status_desc}
+        </div>
+        
+        <!-- Complexity bar -->
+        <div style="font-size: 11px; color: #888; margin-bottom: 3px; display: flex; justify-content: space-between;">
+            <span>Complexity Level (Log Scale)</span>
+            <span>{search_space:,} permutations</span>
+        </div>
+        <div style="background-color: #222; height: 12px; border-radius: 6px; position: relative; overflow: hidden; border: 1px solid #444; margin-bottom: 15px;">
+            <div style="background-color: {status_color}; width: {pct}%; height: 100%; transition: width 0.5s ease-in-out;"></div>
+            <div style="position: absolute; left: {limit_pct}%; top: 0; bottom: 0; width: 2px; background-color: #ff9800;" title="Safety Limit"></div>
+        </div>
+        
+        <!-- Details grid -->
+        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; font-size: 12px;">
+            <div>
+                <span style="color: #888;">ESTIMATED RUNTIME:</span> <strong style="color: #fff;">{time_str}</strong>
+            </div>
+            <div>
+                <span style="color: #888;">CPU CORES DETECTED:</span> <strong style="color: #fff;">{cores}</strong>
+            </div>
+            <div>
+                <span style="color: #888;">CHECKSUM FILTER PASS:</span> <strong style="color: #fff;">~{checksum_ratio:.4f}%</strong>
+            </div>
+            <div>
+                <span style="color: #888;">ADDRESS MATCHING:</span> <strong style="color: { '#00e676' if target_address_provided else '#ff1744' };">{ 'ENABLED' if target_address_provided else 'DISABLED' }</strong>
+            </div>
+        </div>
+    </div>
+    """
+    return report_html
+
+
 def page_wrong_order():
-    render_section_header("\U0001F500", "WRONG WORD ORDER HELPER", f"PERMUTE ≤ {MAX_ORDER_POSITIONS} WORDS")
+    render_section_header("\U0001F500", "WRONG WORD ORDER HELPER", "CONSTRAINED PERMUTATION ENGINE")
     col1, col2 = st.columns([3, 2])
     with col1:
-        open_box("WORD ORDER RECOVERY", live=True)
-        phrase = st.text_area(
-            "Words (space-separated, any order)",
-            key="wo_in", height=100,
+        open_box("CONSTRAINED PERMUTATION RECOVERY", live=True)
+        st.markdown(
+            "If you know the exact positions of some words, enter them below and use `?` for the unknown positions "
+            "to drastically reduce the search space."
         )
-        target = st.text_input("TARGET ADDRESS (optional)", key="wo_target")
-        word_count = len(phrase.split())
+        template = st.text_area(
+            "TEMPLATE PHRASE - place known words, use '?' for unknown positions",
+            value="",
+            placeholder="e.g. abandon ? ? abandon abandon ?",
+            key="wo_template",
+            height=80,
+        )
+        pool = st.text_input(
+            "POOL WORDS - words to fill the '?' positions (space-separated)",
+            value="",
+            placeholder="e.g. about art baby",
+            key="wo_pool",
+        )
+        target = st.text_input("TARGET ADDRESS (optional - filter candidates)", key="wo_target")
+        
+        # Calculate search space
+        from collections import Counter
+        import math
+        
+        try:
+            from recovery_utils import _split_normalized
+            template_words = _split_normalized(template) if template.strip() else []
+        except Exception:
+            template_words = template.lower().split() if template.strip() else []
+            
+        unknowns = template_words.count("?")
+        pool_words = [w.strip().lower() for w in pool.split()] if pool.strip() else []
+        
+        search_space = 0
+        if pool_words:
+            counts = Counter(pool_words)
+            search_space = math.factorial(len(pool_words))
+            for c in counts.values():
+                search_space //= math.factorial(c)
+                
         render_status_cards([
-            ("WORD COUNT", str(word_count), "orange" if word_count > MAX_ORDER_POSITIONS else "green" if word_count else ""),
-            ("CAP", str(MAX_ORDER_POSITIONS), ""),
-            ("PERMUTATIONS", f"{(1 if word_count == 0 else __import__('math').factorial(min(word_count, MAX_ORDER_POSITIONS))):,}", ""),
-            ("ENGINE", "OFFLINE", "green"),
+            ("UNKNOWN SLOTS", str(unknowns), "orange" if unknowns else ""),
+            ("POOL SIZE", str(len(pool_words)), ""),
+            ("PERMUTATIONS", f"{search_space:,}" if search_space else "0", ""),
+            ("ENGINE", "OFFLINE (MULTIPROCESSING)", "green"),
         ])
-        if _btn("RUN ORDER RECOVERY", key="wo_run", variant="orange"):
-            if word_count == 0:
-                st.warning("Provide some words.")
-            elif word_count > MAX_ORDER_POSITIONS:
-                st.error(f"Engine is hard-capped at {MAX_ORDER_POSITIONS} words.")
-                log_event("err", f"Refused order recovery: {word_count} > {MAX_ORDER_POSITIONS}")
+        
+        # Add live feasibility report if template and pool are provided
+        if template.strip() and pool.strip():
+            st.markdown("### Feasibility Assessment")
+            report_html = render_feasibility_report(search_space, target.strip() != "", len(template_words))
+            st.markdown(report_html, unsafe_allow_html=True)
+            
+            is_feasible = search_space <= 5_000_000
+            
+            if is_feasible:
+                if _btn("RUN ORDER RECOVERY", key="wo_run", variant="orange"):
+                    if not template.strip():
+                        st.warning("Provide a template phrase.")
+                    elif "?" not in template:
+                        st.warning("Template must contain '?' to indicate where pool words should be inserted.")
+                    elif len(pool_words) != unknowns:
+                        st.error(f"Mismatch: template has {unknowns} '?' positions, but pool has {len(pool_words)} words.")
+                    else:
+                        target_arg = target.strip() or None
+                        est_time = estimate_recovery_time(search_space, target_arg is not None, len(template_words))
+                        
+                        st.info(f"Estimated Runtime: {est_time:.2f} seconds.")
+                        progress_bar = st.progress(0.0)
+                        status_text = st.empty()
+                        
+                        def cb(checked, total, found):
+                            pct = min(1.0, float(checked) / total)
+                            progress_bar.progress(pct)
+                            status_text.markdown(
+                                f"**Checked**: {checked:,} / {total:,} ({pct*100:.1f}%) | "
+                                f"**Candidates Found**: {found}"
+                            )
+                            
+                        log_event("info", f"Starting multiprocessing order recovery for {search_space:,} permutations...")
+                        with st.spinner("Executing permutation search..."):
+                            try:
+                                result = recover_word_order(
+                                    template,
+                                    pool_words,
+                                    target_address=target_arg,
+                                    progress_callback=cb,
+                                )
+                            except ValueError as e:
+                                st.error(str(e))
+                                log_event("err", f"Order recovery error: {e}")
+                                return
+                                
+                        cand = result["candidates"]
+                        
+                        # Transparency Statistics
+                        st.markdown("### Recovery Metrics")
+                        render_status_cards([
+                            ("TOTAL PERMUTATIONS", f"{result['search_space']:,}", ""),
+                            ("CHECKSUM PASSED", f"{result['checksum_passed']:,}", "green"),
+                            ("CHECKSUM FILTERED", f"{result['checked'] - result['checksum_passed']:,}", "orange"),
+                            ("SPEED", f"{int(result['checked'] / (result['elapsed_time'] or 0.001)):,} keys/s", ""),
+                        ])
+                        
+                        if cand:
+                            log_event("ok", f"Order recovery found {len(cand)} candidate(s) in {result['elapsed_time']:.2f}s")
+                            st.success(f"Found {len(cand)} valid ordering(s) in {result['elapsed_time']:.2f} seconds.")
+                            for c in cand[:10]:
+                                st.code(c, language="text")
+                            if result["truncated"]:
+                                st.warning("Truncated at 100 candidates.")
+                        else:
+                            log_event("warn", "No valid orderings found")
+                            st.error("No checksum-valid orderings found.")
             else:
-                target_arg = target.strip() or None
-                words = phrase.split()
-                with st.spinner("Permuting and validating..."):
-                    try:
-                        result = recover_word_order(words, target_address=target_arg)
-                    except ValueError as e:
-                        st.error(str(e))
-                        log_event("err", f"Order recovery error: {e}")
-                        return
-                cand = result["candidates"]
-                if cand:
-                    log_event("ok", f"Order recovery returned {len(cand)} candidate(s)")
-                    st.success(f"Found {len(cand)} valid ordering(s).")
-                    for c in cand[:10]:
-                        st.code(c, language="text")
-                    if result["truncated"]:
-                        st.warning("Truncated at 100 candidates.")
-                else:
-                    log_event("warn", "No valid orderings found")
-                    st.error("No checksum-valid orderings found.")
+                log_event("warn", f"Recovery feasibility check: {search_space:,} permutations is INFEASIBLE")
+                st.error("⚠️ Order recovery engine locked because the permutations search space is too large. Please lock more words to make it feasible.")
         close_box()
     with col2:
         render_terminal("recovery :: order")

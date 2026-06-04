@@ -191,16 +191,12 @@ class TestRecoverWordOrder:
         assert result["with_target"] is False
 
     def test_refuses_input_longer_than_ceiling(self):
-        # Spec: refuse with ValueError when len(words) > MAX_ORDER_POSITIONS.
-        # The 12-word test vector exceeds the 8-word cap.
-        words = VALID_MNEMONIC.split()
+        # A 12-word mnemonic with unique words has 12! = 479,001,600 permutations,
+        # which exceeds the 5,000,000 limit.
+        words = "abandon ability able about above absent absorb abstract absurd abuse access accident".split()
         assert len(words) == 12
         with pytest.raises(ValueError):
-            recover_word_order(words, max_positions=8)
-        # Even if the caller passes a high max_positions, the absolute
-        # ceiling is enforced.
-        with pytest.raises(ValueError):
-            recover_word_order(words, max_positions=12)
+            recover_word_order(words)
 
     def test_rejects_non_bip39_words(self):
         with pytest.raises(ValueError):
@@ -342,3 +338,76 @@ class TestNoSecretLeak:
         flat = repr(scrubbed)
         assert "abandon" not in flat
         assert "about" not in flat
+
+
+class TestNewRecoveryFeatures:
+    def test_estimate_recovery_time(self):
+        from recovery_utils import estimate_recovery_time
+        t1 = estimate_recovery_time(2048, False, 12)
+        assert isinstance(t1, float)
+        assert t1 > 0.0
+
+        t2 = estimate_recovery_time(2048, True, 12)
+        assert t2 > t1
+
+    def test_recover_word_order_constrained(self):
+        template = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon ? ?"
+        pool = ["abandon", "about"]
+        
+        callback_called = []
+        def cb(checked, total, found):
+            callback_called.append((checked, total, found))
+            
+        result = recover_word_order(
+            template_or_words=template,
+            pool_words=pool,
+            target_address=EXPECTED_ETH_FIRST,
+            progress_callback=cb
+        )
+        
+        assert result["with_target"] is True
+        assert VALID_MNEMONIC in result["candidates"]
+        assert len(callback_called) > 0
+        assert result["checked"] == 2
+
+
+class TestAutomatedOrderRecoveryRequirements:
+    def test_12_word_mnemonic_recovery(self):
+        template = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon ? ?"
+        pool = ["abandon", "about"]
+        result = recover_word_order(template, pool)
+        assert VALID_MNEMONIC in result["candidates"]
+
+    def test_24_word_mnemonic_recovery(self):
+        mnemonic_24 = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art"
+        template = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon ? ?"
+        pool = ["abandon", "art"]
+        result = recover_word_order(template, pool)
+        assert mnemonic_24 in result["candidates"]
+
+    def test_recovery_with_duplicate_words(self):
+        template = "abandon abandon abandon abandon abandon abandon abandon abandon abandon ? ? ?"
+        pool = ["abandon", "abandon", "about"]
+        result = recover_word_order(template, pool)
+        assert VALID_MNEMONIC in result["candidates"]
+
+    def test_recovery_with_constrained_template(self):
+        template = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon ?"
+        pool = ["about"]
+        result = recover_word_order(template, pool)
+        assert VALID_MNEMONIC in result["candidates"]
+
+    def test_recovery_address_matching_enabled(self):
+        template = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon ? ?"
+        pool = ["abandon", "about"]
+        result = recover_word_order(template, pool, target_address=EXPECTED_ETH_FIRST)
+        assert result["candidates"] == [VALID_MNEMONIC]
+        assert result["with_target"] is True
+
+    def test_recovery_address_matching_disabled(self):
+        template = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon ? ?"
+        pool = ["abandon", "about"]
+        result = recover_word_order(template, pool, target_address=None)
+        assert VALID_MNEMONIC in result["candidates"]
+        assert len(result["candidates"]) >= 1
+        assert result["with_target"] is False
