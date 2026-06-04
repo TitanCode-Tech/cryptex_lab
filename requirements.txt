@@ -30,3 +30,11 @@ requests==2.31.0
 # Cryptography - for license signature verification and build integrity signing
 cryptography==48.0.0
 
+# 2FA / TOTP - offline time-based one-time passwords for role elevation
+pyotp==2.9.0
+
+# Build-time only: compile security modules to native extensions (developer machine)
+# Clients do not need Cython — they receive the pre-compiled .so/.pyd files
+cython==3.2.5
+setuptools>=68.0
+
