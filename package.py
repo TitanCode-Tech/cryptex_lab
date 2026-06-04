@@ -7,6 +7,7 @@ CLIENT_FILES = [
     "app.py",
     "modes.py",
     "security_utils.py",
+    "machine_id.py",
     "wallet_utils.py",
     "recovery_utils.py",
     "derivation_utils.py",
@@ -48,6 +49,7 @@ CLIENT_DIRS = [
 DEVELOPER_ONLY_FILES = [
     "private_key.pem",
     "generate_keys.py",
+    "obfuscate.py",
     "implementation_plan.md",
     "task.md",
     "package.py",

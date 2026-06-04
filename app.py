@@ -87,8 +87,10 @@ except ImportError:
 
 # Enterprise Security Imports & Helpers
 from audit import log_event as log_audit_event
-from license_utils import verify_license_data, check_module_access
+from license_utils import verify_license_data, check_module_access, verify_machine_fingerprint
 from integrity import verify_build_integrity
+
+import pyotp
 
 def check_license() -> tuple[bool, str, dict]:
     license_path = Path("license.json")
@@ -941,10 +943,17 @@ def render_sidebar() -> str:
             key="user_role_selector_sidebar"
         )
         if selected_role != current_role:
-            st.session_state["user_role"] = selected_role
-            log_event("ok", f"Changed role to {selected_role}")
-            # Reset authorization since role changed
-            st.session_state["authorized_for_recovery"] = False
+            if selected_role in TOTP_PROTECTED_ROLES:
+                # Gate elevation behind TOTP — store pending and redirect to challenge
+                st.session_state["pending_role"] = selected_role
+                st.session_state.pop("totp_fail_count", None)
+                st.session_state.pop("totp_locked_until", None)
+            else:
+                # Downgrade or switch to unprotected role — no 2FA needed
+                st.session_state["user_role"] = selected_role
+                st.session_state.pop("pending_role", None)
+                log_event("ok", f"Changed role to {selected_role}")
+                st.session_state["authorized_for_recovery"] = False
             st.rerun()
 
         st.divider()
@@ -2716,6 +2725,105 @@ ROLES = {
     ]
 }
 
+# Roles that require TOTP verification before elevation
+TOTP_PROTECTED_ROLES: set[str] = {"Senior Analyst", "Admin"}
+
+
+def _get_totp_secret(role: str) -> str | None:
+    """Return the TOTP base32 secret for a role from the signed license, or None if absent."""
+    _, _, license_data = check_license()
+    return license_data.get("totp_secrets", {}).get(role)
+
+
+def render_totp_challenge() -> None:
+    """Replace the main content area with a TOTP verification form for pending role elevation."""
+    pending_role = st.session_state.get("pending_role", "")
+    if not pending_role:
+        return
+
+    render_section_header("🔐", "ROLE ELEVATION — 2FA REQUIRED", f"ELEVATING TO: {pending_role.upper()}")
+    open_box("TOTP VERIFICATION")
+
+    now = datetime.now(timezone.utc)
+    fail_count = st.session_state.get("totp_fail_count", 0)
+    locked_until = st.session_state.get("totp_locked_until", 0.0)
+
+    if now.timestamp() < locked_until:
+        remaining = int(locked_until - now.timestamp())
+        st.error(f"Too many failed attempts. Try again in {remaining} second(s).")
+        if st.button("CANCEL ROLE CHANGE", key="totp_cancel_locked"):
+            st.session_state.pop("pending_role", None)
+            st.rerun()
+        close_box()
+        return
+
+    totp_secret = _get_totp_secret(pending_role)
+    if not totp_secret:
+        st.error(
+            f"TOTP not configured for role '{pending_role}'. "
+            "Ask your administrator to provision 2FA secrets in the license file."
+        )
+        log_audit_event(
+            "system", "totp_challenge",
+            f"TOTP secret missing for role {pending_role}",
+            st.session_state.get("user_role", "Unknown"),
+            get_current_mode(),
+        )
+        if st.button("CANCEL", key="totp_cancel_no_secret"):
+            st.session_state.pop("pending_role", None)
+            st.rerun()
+        close_box()
+        return
+
+    current_role = st.session_state.get("user_role", "Viewer")
+    st.warning(
+        f"Role **{pending_role}** is protected. "
+        "Open your authenticator app and enter the current 6-digit code."
+    )
+
+    with st.form("totp_verification_form"):
+        code = st.text_input("6-DIGIT AUTHENTICATOR CODE", max_chars=6, placeholder="000000")
+        submitted = st.form_submit_button("VERIFY & ELEVATE ROLE", use_container_width=True)
+
+    if st.button("CANCEL ROLE CHANGE", key="totp_cancel_btn"):
+        st.session_state.pop("pending_role", None)
+        st.session_state.pop("totp_fail_count", None)
+        st.rerun()
+
+    if submitted:
+        totp = pyotp.TOTP(totp_secret)
+        if totp.verify(code.strip(), valid_window=1):
+            st.session_state["user_role"] = pending_role
+            st.session_state.pop("pending_role", None)
+            st.session_state.pop("totp_fail_count", None)
+            st.session_state.pop("totp_locked_until", None)
+            st.session_state["authorized_for_recovery"] = False
+            log_event("ok", f"Role elevated from {current_role} to {pending_role} via TOTP 2FA")
+            log_audit_event(
+                "system", "totp_challenge",
+                f"Role elevated from {current_role} to {pending_role}",
+                pending_role, get_current_mode(),
+            )
+            st.success("Verification successful. Role elevated.")
+            st.rerun()
+        else:
+            new_fail = fail_count + 1
+            st.session_state["totp_fail_count"] = new_fail
+            log_audit_event(
+                "system", "totp_challenge",
+                f"Failed TOTP attempt #{new_fail} for role {pending_role}",
+                current_role, get_current_mode(),
+            )
+            if new_fail >= 3:
+                st.session_state["totp_locked_until"] = now.timestamp() + 30
+                log_event("warn", f"TOTP locked after {new_fail} failed attempts for role {pending_role}")
+                st.error("Too many failed attempts. Locked for 30 seconds.")
+            else:
+                st.error(f"Invalid code. {3 - new_fail} attempt(s) remaining.")
+
+    close_box()
+
+
 # Mapping of pages to functional module boundaries defined in license_data.get("modules")
 PAGE_MODULE_MAP = {
     PAGE_RECOVERY_SELECTOR: "recovery",
@@ -2847,6 +2955,18 @@ def main() -> None:
         page_license_activation(license_err)
         return
 
+    # 2b. Machine Fingerprint Check — license must be bound to this workstation
+    fp_ok, fp_err = verify_machine_fingerprint(license_data)
+    if not fp_ok:
+        render_header()
+        st.error("MACHINE AUTHORIZATION FAILURE")
+        st.warning(fp_err)
+        st.info(
+            "Run `python machine_id.py` on this machine and send the fingerprint "
+            "to Titan Code to obtain a machine-specific license."
+        )
+        st.stop()
+
     if "current_page" not in st.session_state:
         st.session_state["current_page"] = PAGE_SECURITY_LANDING
 
@@ -2854,7 +2974,12 @@ def main() -> None:
     render_header()
     render_active_case_banner()
 
-    # 3. RBAC (Role-Based Access Control) Page Access Check
+    # 3. TOTP Role Elevation Challenge (intercepts before RBAC)
+    if st.session_state.get("pending_role"):
+        render_totp_challenge()
+        return
+
+    # 4. RBAC (Role-Based Access Control) Page Access Check
     user_role = st.session_state.get("user_role", "Viewer")
     allowed_pages = ROLES.get(user_role, ROLES["Viewer"])
     if page not in allowed_pages:
@@ -2871,7 +2996,7 @@ def main() -> None:
             log_event("warn", f"License check failed for module '{required_module}'")
             return
 
-    # 4. Authorization Workflow acknowledgement check
+    # 5. Authorization Workflow acknowledgement check
     if page in OFFLINE_LOCKED_PAGES:
         if not st.session_state.get("authorized_for_recovery", False):
             render_authorization_workflow(page)

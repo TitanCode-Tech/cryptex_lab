@@ -76,3 +76,33 @@ def check_module_access(license_data: dict, module_name: str) -> bool:
     # Case-insensitive check
     allowed_modules_lower = [m.lower() for m in allowed_modules]
     return module_name.lower() in allowed_modules_lower or "all" in allowed_modules_lower
+
+
+def verify_machine_fingerprint(license_data: dict) -> tuple[bool, str]:
+    """
+    Verify that this machine matches the fingerprint embedded in the license.
+
+    "any" in the license means a dev/demo license with no machine binding.
+    Absence of the key is treated as a security failure (legacy licenses must
+    be re-issued with a fingerprint before deployment).
+    """
+    from machine_id import get_machine_fingerprint
+
+    licensed_fp = license_data.get("machine_fingerprint")
+    if licensed_fp is None:
+        return (
+            False,
+            "License is missing a machine fingerprint. "
+            "Re-issue the license with generate_keys.py to bind it to this workstation.",
+        )
+    if licensed_fp == "any":
+        return True, ""
+
+    current_fp = get_machine_fingerprint()
+    if current_fp != licensed_fp:
+        return (
+            False,
+            "This license is locked to a different machine. "
+            "Contact Titan Code to obtain a license for this workstation.",
+        )
+    return True, ""
