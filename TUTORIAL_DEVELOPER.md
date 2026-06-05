@@ -44,7 +44,7 @@ This document is for **Titan Code developers only**. It covers the complete work
 | `modes.py`, `wallet_utils.py`, `recovery_utils.py`, … | Application logic (plain Python) |
 | `manifest.json` | RSA-signed SHA-256 hashes of all critical files |
 | `public_key.pem` | RSA public key for license/manifest verification |
-| `license.json` | Machine-locked, RSA-signed license with TOTP secrets embedded |
+| `license.json` | Written locally on the client machine after activation — not shipped in the ZIP |
 | `requirements.txt` | Python package dependencies |
 | `assets/`, `.streamlit/` | UI assets and config |
 | `install.py / .sh / .bat` | Cross-platform installer |
@@ -57,96 +57,72 @@ This document is for **Titan Code developers only**. It covers the complete work
 
 ## 2. New Client Onboarding — Step by Step
 
-### Step 1 — Client sends their machine fingerprint
-
-Ask the client to run this on the **target workstation** (the exact machine that will run Cryptex Lab):
-
-```bash
-python machine_id.py
-```
-
-They will see:
-
-```
-Machine Fingerprint:
-  2613bee6eda5f062a3f4d8e1b7c9a0f23d5e4c8b1a6f7e2d9c3b0a4e5f8d1c7
-
-Provide this value to your Cryptex Lab administrator when requesting a license.
-```
-
-They send you the 64-character hex string. This fingerprint is derived from their OS machine ID, primary MAC address, and hostname — it is stable for the life of that OS installation and bound to that physical machine.
+The new model ships the app to everyone first, then delivers the license separately — like commercial software. You build once and issue licenses on demand.
 
 ---
 
-### Step 2 — Generate the machine-locked license
+### Step 1 — Ship the application (one time per platform)
+
+```bash
+python release.py --any   # builds dist/cryptex_lab_client_compiled.zip
+```
+
+Or if you already have a target fingerprint:
+
+```bash
+python release.py <fingerprint>
+```
+
+Deliver `dist/cryptex_lab_client_compiled.zip` to the client via your secure channel (encrypted email, file transfer, or USB for air-gapped sites). **No license is inside the ZIP.**
+
+---
+
+### Step 2 — Client sends their Machine ID
+
+When the client launches the app they see the **LICENSE ACTIVATION** screen. It shows their **Machine ID** — a 64-character fingerprint unique to their workstation. They copy it and send it to you.
+
+The fingerprint is derived from their OS machine ID, primary MAC, and hostname. It is stable for the life of that OS installation.
+
+---
+
+### Step 3 — Generate the machine-locked license key
 
 On your **developer machine**:
 
 ```bash
-python generate_keys.py
-```
-
-When prompted:
-
-```
-Machine fingerprint (or blank for this machine): <paste the client's fingerprint>
+python release.py --license-only <machine_fingerprint>
 ```
 
 Output:
 
 ```
-=== TOTP SECRETS (scan into authenticator app) ===
-  Senior Analyst: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-    URI: otpauth://totp/Cryptex%20Lab:Senior%20Analyst?secret=XXXX...
-  Admin: YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY
-    URI: otpauth://totp/Cryptex%20Lab:Admin?secret=YYYY...
-=== Store these secrets safely — they will NOT be shown again ===
+=== LICENSE ACTIVATION KEY (send this to the client) ===
+CXLAB-eyJ...
+=== Client pastes this into the app: Step 2 → Enter License Key ===
 ```
 
-**Do two things immediately:**
+**Copy the `CXLAB-...` activation key** — this is all you need to send.
 
-1. **Save both TOTP secrets** in your password manager labeled with the client name and date. They are regenerated fresh on every run — if lost, the client is locked out of elevated roles until you reissue.
-2. **Keep the `otpauth://` URIs** — you will send these to the client via a separate secure channel in Step 5.
-
-This produces a signed `license.json` containing the machine fingerprint, TOTP secrets, expiry, and licensed modules — all inside the RSA signature.
+> **No TOTP secrets.** The license no longer contains 2FA credentials. The client generates their own secrets during first-run setup inside the app — you never see them, handle them, or transmit them.
 
 ---
 
-### Step 3 — Build the compiled production package
+### Step 4 — Send the license key to the client
 
-```bash
-python package.py --compiled
-```
+Send the `CXLAB-...` key to the client via any secure channel (encrypted email, messaging, etc.).
 
-This automatically:
-1. Runs `compile_modules.py` — compiles `license_utils.py`, `integrity.py`, `machine_id.py`, and `audit.py` to native `.so` binaries using Cython + gcc
-2. Packages those binaries alongside the remaining `.py` modules into `dist/cryptex_lab_client_compiled.zip`
-
-The ZIP contains the current `license.json` (from Step 2). No separate license file needs to be attached.
+That is the only thing you need to deliver. There is no separate 2FA credential to manage.
 
 ---
 
-### Step 4 — Send the package to the client
+### Step 5 — Client activates and launches
 
-Deliver `dist/cryptex_lab_client_compiled.zip` via your secure delivery channel (encrypted email, secure file transfer, or USB drive for air-gapped sites).
+1. Client pastes the `CXLAB-...` key into **Step 2** on the activation screen → clicks **Activate License**
+2. The app validates the RSA signature and machine fingerprint, then opens the **Security Setup** screen
+3. Client scans QR codes for each role into their authenticator app, verifies each one, clicks **Save & Launch**
+4. App loads — 2FA is configured and ready
 
----
-
-### Step 5 — Send TOTP secrets via a separate secure channel
-
-**Never** bundle TOTP secrets with the application package. Send them separately:
-
-- Encrypted email (PGP / S/MIME)
-- Secure messaging (Signal, etc.)
-- Printed card handed in person
-
-Send the `otpauth://` URI for each role (the client converts it to a QR code and scans it with their authenticator app), or the raw base32 secret for manual entry.
-
----
-
-### Step 6 — Client installs and configures
-
-Direct the client to `TUTORIAL_CLIENT.md` inside the ZIP. They will extract, install, add their TOTP accounts, and launch.
+Direct the client to `TUTORIAL_CLIENT.md` inside the ZIP for the full setup guide.
 
 ---
 
@@ -174,9 +150,8 @@ Produces:
 ### Pre-release checklist
 
 - [ ] `python -m pytest tests/ -v` — all tests pass
-- [ ] `python generate_keys.py` — license issued for the correct client fingerprint, TOTP secrets saved
-- [ ] `python package.py --compiled` — package built successfully
-- [ ] Extract the ZIP on a clean machine and confirm it launches before sending
+- [ ] `python release.py --any` (or with a real fingerprint) — license key printed, TOTP secrets saved
+- [ ] Extract the ZIP on a clean machine and confirm the activation screen loads before sending
 
 ---
 
@@ -190,9 +165,9 @@ Produces:
 
 ### TOTP secrets
 
-- Printed once by `generate_keys.py` and embedded in `license.json`. Not stored anywhere automatically.
-- Save in your vault labeled: `Cryptex Lab TOTP — [Client Name] — [Date]`.
-- If lost: rerun `generate_keys.py` with the same client fingerprint. New secrets are generated, old ones become invalid. Deliver new `license.json` and new TOTP secrets to the client.
+- **You do not hold these.** The client generates their own 2FA secrets during first-run setup inside the app. Secrets are stored only in `totp_secrets.json` on their machine and in their authenticator app.
+- If the client loses their authenticator device or needs to reset 2FA: they delete `totp_secrets.json` on their workstation and relaunch the app — the setup screen appears again and they scan fresh QR codes. No action required from you.
+- `totp_secrets.json` is in `.gitignore` and is never packaged or transmitted.
 
 ### Public key (`public_key.pem`)
 
@@ -204,11 +179,13 @@ Safe to distribute — it can only verify signatures, not create them. Included 
 
 ### Renew an existing client's license (expiry or machine change)
 
-1. Obtain the client's machine fingerprint (`python machine_id.py` on their machine if it changed; reuse the previous one if the machine is the same).
-2. Run `python generate_keys.py` and enter the fingerprint.
-3. Save the new TOTP secrets.
-4. Run `python package.py --compiled` and deliver the new ZIP.
-5. Send new TOTP secrets via secure channel — old secrets are now invalid.
+1. Get their current Machine ID (they open the app — on expiry it shows the activation screen with the ID; on a machine change they send you the new ID directly).
+2. Run:
+   ```bash
+   python release.py --license-only <fingerprint>
+   ```
+3. Send the new `CXLAB-...` key to the client — they paste it in the activation screen.
+4. If it's a machine change, their `totp_secrets.json` from the old machine won't transfer. They delete the old file (if copied) and re-run setup — the app shows the Security Setup screen automatically.
 
 ### Dev / demo license (no machine locking)
 
@@ -250,11 +227,9 @@ Always run before packaging a release. Covers recovery engines, derivation helpe
 When you push a code change:
 
 1. Make and test your changes locally (`python -m pytest tests/`).
-2. Run `python generate_keys.py` (with the client's fingerprint) — this regenerates `manifest.json` with updated file hashes. It also regenerates TOTP secrets, so save them and deliver them to the client alongside the update.
-3. Run `python package.py --compiled` to produce a fresh ZIP.
-4. Deliver the new ZIP and new TOTP secrets to the client. They replace the old files and re-scan the authenticator secrets.
-
-> **Keeping TOTP secrets stable across updates:** The TOTP secrets are independent of the code — only the file hashes in `manifest.json` change when code changes. If you want to avoid the client re-scanning their authenticator, manually copy the `totp_secrets` block from the old `license.json` into `license_data` in `generate_keys.py` before running it.
+2. Run `python release.py <client_fingerprint>` — this regenerates `manifest.json` with updated file hashes, creates a new license key, and packages a fresh ZIP.
+3. Deliver the new ZIP to the client. They re-run the installer and paste the new `CXLAB-...` key into the activation screen.
+4. Their existing `totp_secrets.json` is unaffected — 2FA credentials are independent of code updates. The client does **not** need to re-scan their authenticator.
 
 ---
 
@@ -285,14 +260,17 @@ The `.so` file is a native shared library — it is imported by Python with `imp
 ## 9. Quick Reference — Developer Commands
 
 ```bash
+# Full release — compile + package (initial client delivery)
+python release.py <fingerprint>
+
+# Dev/demo release — no machine locking (internal testing)
+python release.py --any
+
+# License key only — client already has the app, needs activation key
+python release.py --license-only <fingerprint>
+
 # Get machine fingerprint of THIS machine
 python machine_id.py
-
-# Issue a machine-locked license (prompts for client fingerprint)
-python generate_keys.py
-
-# Issue a dev/demo license (no machine locking)
-python generate_keys.py --any
 
 # Verify Cython + gcc are available
 python compile_modules.py --check
@@ -300,7 +278,7 @@ python compile_modules.py --check
 # Compile the 4 security modules to native .so binaries
 python compile_modules.py
 
-# Build the production client package (compiles + zips)
+# Build the production client package only (without regenerating license)
 python package.py --compiled
 
 # Build the standard (plain source) developer archive

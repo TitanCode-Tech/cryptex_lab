@@ -39,3 +39,7 @@ private_key.pem
 audit_logs/
 manifest.json
 
+# Client-specific files — machine-locked, never committed
+license.json
+totp_secrets.json
+

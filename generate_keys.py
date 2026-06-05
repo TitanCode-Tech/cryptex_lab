@@ -2,7 +2,6 @@ import json
 import base64
 import hashlib
 import sys
-import pyotp
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives import hashes
@@ -69,42 +68,30 @@ def main():
     print("Saved public_key.pem")
     
     # 3. Machine fingerprint
-    # Pass --any as the first argument to generate a dev/demo license with no machine binding.
+    # Usage:
+    #   python generate_keys.py <fingerprint>   machine-locked license
+    #   python generate_keys.py --any           dev/demo license (no machine locking)
+    #   python generate_keys.py                 locks to THIS machine (dev shortcut)
     if len(sys.argv) > 1 and sys.argv[1] == "--any":
         machine_fp = "any"
-        print("Machine fingerprint: any (dev/demo license — NOT machine-locked)")
+        print("Machine fingerprint: any (dev/demo — NOT machine-locked)")
+    elif len(sys.argv) > 1:
+        machine_fp = sys.argv[1].strip()
+        print(f"Machine fingerprint: {machine_fp[:16]}... (provided)")
     else:
-        print("\n=== MACHINE FINGERPRINT ===")
-        print("Run 'python machine_id.py' on the TARGET machine to get its fingerprint.")
-        print("Leave blank (press Enter) to embed THIS machine's fingerprint.\n")
-        provided = input("Machine fingerprint (or blank for this machine): ").strip()
-        if provided:
-            machine_fp = provided
-            print(f"Using provided fingerprint: {machine_fp[:16]}...")
-        else:
-            machine_fp = get_machine_fingerprint()
-            print(f"Using this machine's fingerprint: {machine_fp[:16]}...")
+        machine_fp = get_machine_fingerprint()
+        print(f"Machine fingerprint: {machine_fp[:16]}... (this machine)")
 
     # 4. Create license data
-    # Generate fresh TOTP secrets for each protected role (32-char base32)
-    totp_secrets = {
-        "Senior Analyst": pyotp.random_base32(),
-        "Admin": pyotp.random_base32(),
-    }
+    # TOTP secrets are NOT in the license — the client sets them up via the in-app
+    # first-run setup flow. The developer never sees or handles 2FA credentials.
     license_data = {
         "company": "Titan Code",
         "client": "Authorized User",
         "expires": "2027-01-01",
         "modules": ["recovery", "forensic", "validator", "derivation", "reports", "vault", "advanced"],
         "machine_fingerprint": machine_fp,
-        "totp_secrets": totp_secrets,
     }
-    print("\n=== TOTP SECRETS (scan into authenticator app) ===")
-    for role, secret in totp_secrets.items():
-        uri = pyotp.TOTP(secret).provisioning_uri(name=role, issuer_name="Cryptex Lab")
-        print(f"  {role}: {secret}")
-        print(f"    URI: {uri}")
-    print("=== Store these secrets safely — they will NOT be shown again ===\n")
     
     # Canonical string representation for signing
     license_bytes = json.dumps(license_data, sort_keys=True).encode("utf-8")
@@ -125,6 +112,13 @@ def main():
     with open("license.json", "w") as f:
         json.dump(license_file_content, f, indent=2)
     print("Saved signed license.json")
+
+    # Print activation key — this is what the client pastes into the app
+    from license_utils import encode_license_key
+    license_key = encode_license_key(license_file_content)
+    print("\n=== LICENSE ACTIVATION KEY (send this to the client) ===")
+    print(license_key)
+    print("=== Client pastes this into the app: Step 2 → Enter License Key ===\n")
 
     # 4. Generate build integrity manifest
     print("Generating build integrity manifest...")

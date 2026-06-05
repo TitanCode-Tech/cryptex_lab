@@ -68,6 +68,27 @@ def verify_license_data(license_dict: dict, pubkey_path: Path | None = None) -> 
     except Exception as e:
         return False, f"Verification error: {str(e)}", {}
 
+def encode_license_key(license_dict: dict) -> str:
+    """Encode a license dict to a shareable activation key string."""
+    import zlib
+    raw = json.dumps(license_dict, separators=(",", ":")).encode()
+    compressed = zlib.compress(raw, level=9)
+    b64 = base64.urlsafe_b64encode(compressed).decode().rstrip("=")
+    return "CXLAB-" + b64
+
+
+def decode_license_key(key: str) -> dict:
+    """Decode an activation key string back to a license dict. Raises ValueError on bad input."""
+    import zlib
+    stripped = key.strip().removeprefix("CXLAB-").replace(" ", "").replace("\n", "")
+    padding = (4 - len(stripped) % 4) % 4
+    try:
+        compressed = base64.urlsafe_b64decode(stripped + "=" * padding)
+        return json.loads(zlib.decompress(compressed))
+    except Exception as exc:
+        raise ValueError(f"Invalid license key: {exc}") from exc
+
+
 def check_module_access(license_data: dict, module_name: str) -> bool:
     """
     Checks if the license authorizes access to a specific module.

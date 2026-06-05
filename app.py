@@ -87,21 +87,26 @@ except ImportError:
 
 # Enterprise Security Imports & Helpers
 from audit import log_event as log_audit_event
-from license_utils import verify_license_data, check_module_access, verify_machine_fingerprint
+from license_utils import verify_license_data, check_module_access, verify_machine_fingerprint, decode_license_key
 from integrity import verify_build_integrity
 
 import pyotp
 
 def check_license() -> tuple[bool, str, dict]:
-    license_path = Path("license.json")
-    if not license_path.exists():
-        return False, "License file (license.json) is missing.", {}
-    try:
-        with open(license_path, "r", encoding="utf-8") as f:
-            license_dict = json.load(f)
-        return verify_license_data(license_dict, Path("public_key.pem"))
-    except Exception as e:
-        return False, f"Failed to read license: {str(e)}", {}
+    # Cache per session — RSA verification is expensive, license never changes at runtime
+    if "_license_cache" not in st.session_state:
+        license_path = Path("license.json")
+        if not license_path.exists():
+            result: tuple[bool, str, dict] = (False, "License file (license.json) is missing.", {})
+        else:
+            try:
+                with open(license_path, "r", encoding="utf-8") as f:
+                    license_dict = json.load(f)
+                result = verify_license_data(license_dict, Path("public_key.pem"))
+            except Exception as e:
+                result = (False, f"Failed to read license: {str(e)}", {})
+        st.session_state["_license_cache"] = result
+    return st.session_state["_license_cache"]
 
 
 
@@ -944,17 +949,16 @@ def render_sidebar() -> str:
         )
         if selected_role != current_role:
             if selected_role in TOTP_PROTECTED_ROLES:
-                # Gate elevation behind TOTP — store pending and redirect to challenge
-                st.session_state["pending_role"] = selected_role
-                st.session_state.pop("totp_fail_count", None)
-                st.session_state.pop("totp_locked_until", None)
+                secret = _get_totp_secret(selected_role)
+                if secret:
+                    _totp_dialog(selected_role, secret)  # instant overlay, no extra rerun
+                else:
+                    st.error(f"No 2FA secret found for {selected_role}. Delete totp_secrets.json and relaunch to redo setup.")
             else:
-                # Downgrade or switch to unprotected role — no 2FA needed
                 st.session_state["user_role"] = selected_role
-                st.session_state.pop("pending_role", None)
-                log_event("ok", f"Changed role to {selected_role}")
                 st.session_state["authorized_for_recovery"] = False
-            st.rerun()
+                log_event("ok", f"Changed role to {selected_role}")
+                st.rerun()
 
         st.divider()
 
@@ -2729,99 +2733,83 @@ ROLES = {
 TOTP_PROTECTED_ROLES: set[str] = {"Senior Analyst", "Admin"}
 
 
+def _has_totp_setup() -> bool:
+    """True only if totp_secrets.json exists with a valid secret for every protected role."""
+    p = Path("totp_secrets.json")
+    if not p.exists():
+        return False
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return all(isinstance(data.get(role), str) and data[role] for role in TOTP_PROTECTED_ROLES)
+    except Exception:
+        return False
+
+
 def _get_totp_secret(role: str) -> str | None:
-    """Return the TOTP base32 secret for a role from the signed license, or None if absent."""
-    _, _, license_data = check_license()
-    return license_data.get("totp_secrets", {}).get(role)
+    """Return the base32 TOTP secret for a role from the local secrets file."""
+    try:
+        data = json.loads(Path("totp_secrets.json").read_text(encoding="utf-8"))
+        return data.get(role)
+    except Exception:
+        return None
 
 
-def render_totp_challenge() -> None:
-    """Replace the main content area with a TOTP verification form for pending role elevation."""
-    pending_role = st.session_state.get("pending_role", "")
-    if not pending_role:
-        return
-
-    render_section_header("🔐", "ROLE ELEVATION — 2FA REQUIRED", f"ELEVATING TO: {pending_role.upper()}")
-    open_box("TOTP VERIFICATION")
-
+@st.dialog("2FA Verification")
+def _totp_dialog(target_role: str, secret: str) -> None:
+    """Overlay dialog for TOTP role elevation — no page replacement needed."""
+    current_role = st.session_state.get("user_role", "Viewer")
     now = datetime.now(timezone.utc)
     fail_count = st.session_state.get("totp_fail_count", 0)
     locked_until = st.session_state.get("totp_locked_until", 0.0)
 
     if now.timestamp() < locked_until:
         remaining = int(locked_until - now.timestamp())
-        st.error(f"Too many failed attempts. Try again in {remaining} second(s).")
-        if st.button("CANCEL ROLE CHANGE", key="totp_cancel_locked"):
-            st.session_state.pop("pending_role", None)
+        st.error(f"Too many failed attempts. Try again in {remaining}s.")
+        if st.button("Cancel", use_container_width=True):
+            st.session_state.pop("totp_fail_count", None)
+            del st.session_state["user_role_selector_sidebar"]
             st.rerun()
-        close_box()
         return
 
-    totp_secret = _get_totp_secret(pending_role)
-    if not totp_secret:
-        st.error(
-            f"TOTP not configured for role '{pending_role}'. "
-            "Ask your administrator to provision 2FA secrets in the license file."
-        )
-        log_audit_event(
-            "system", "totp_challenge",
-            f"TOTP secret missing for role {pending_role}",
-            st.session_state.get("user_role", "Unknown"),
-            get_current_mode(),
-        )
-        if st.button("CANCEL", key="totp_cancel_no_secret"):
-            st.session_state.pop("pending_role", None)
+    if fail_count > 0:
+        st.error(f"Wrong code — {3 - fail_count} attempt(s) remaining.")
+
+    st.write(f"Enter the **{target_role}** code from your authenticator app.")
+    code = st.text_input("Code", max_chars=6, placeholder="000000", label_visibility="collapsed")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        verify = st.button("Verify", type="primary", use_container_width=True)
+    with col2:
+        if st.button("Cancel", use_container_width=True):
+            st.session_state.pop("totp_fail_count", None)
+            del st.session_state["user_role_selector_sidebar"]
             st.rerun()
-        close_box()
-        return
 
-    current_role = st.session_state.get("user_role", "Viewer")
-    st.warning(
-        f"Role **{pending_role}** is protected. "
-        "Open your authenticator app and enter the current 6-digit code."
-    )
-
-    with st.form("totp_verification_form"):
-        code = st.text_input("6-DIGIT AUTHENTICATOR CODE", max_chars=6, placeholder="000000")
-        submitted = st.form_submit_button("VERIFY & ELEVATE ROLE", use_container_width=True)
-
-    if st.button("CANCEL ROLE CHANGE", key="totp_cancel_btn"):
-        st.session_state.pop("pending_role", None)
-        st.session_state.pop("totp_fail_count", None)
-        st.rerun()
-
-    if submitted:
-        totp = pyotp.TOTP(totp_secret)
-        if totp.verify(code.strip(), valid_window=1):
-            st.session_state["user_role"] = pending_role
-            st.session_state.pop("pending_role", None)
+    if verify and code:
+        if pyotp.TOTP(secret).verify(code.strip(), valid_window=1):
+            st.session_state["user_role"] = target_role
             st.session_state.pop("totp_fail_count", None)
             st.session_state.pop("totp_locked_until", None)
             st.session_state["authorized_for_recovery"] = False
-            log_event("ok", f"Role elevated from {current_role} to {pending_role} via TOTP 2FA")
+            log_event("ok", f"Role elevated to {target_role} via 2FA")
             log_audit_event(
-                "system", "totp_challenge",
-                f"Role elevated from {current_role} to {pending_role}",
-                pending_role, get_current_mode(),
+                "system", "totp", f"Elevated to {target_role}",
+                target_role, get_current_mode(),
             )
-            st.success("Verification successful. Role elevated.")
+            del st.session_state["user_role_selector_sidebar"]
             st.rerun()
         else:
             new_fail = fail_count + 1
             st.session_state["totp_fail_count"] = new_fail
             log_audit_event(
-                "system", "totp_challenge",
-                f"Failed TOTP attempt #{new_fail} for role {pending_role}",
+                "system", "totp", f"Failed attempt #{new_fail} for {target_role}",
                 current_role, get_current_mode(),
             )
             if new_fail >= 3:
                 st.session_state["totp_locked_until"] = now.timestamp() + 30
-                log_event("warn", f"TOTP locked after {new_fail} failed attempts for role {pending_role}")
-                st.error("Too many failed attempts. Locked for 30 seconds.")
-            else:
-                st.error(f"Invalid code. {3 - new_fail} attempt(s) remaining.")
-
-    close_box()
+                log_event("warn", f"TOTP locked after {new_fail} failed attempts")
+            st.rerun()
 
 
 # Mapping of pages to functional module boundaries defined in license_data.get("modules")
@@ -2841,45 +2829,136 @@ PAGE_MODULE_MAP = {
     PAGE_EXPORTER: "reports",
 }
 
-def page_license_activation(err_msg: str) -> None:
-    render_section_header("🔑", "LICENSE ACTIVATION REQUIRED", "OFFLINE VERIFICATION SYSTEM")
-    
-    st.error(f"Application Inactive: {err_msg}")
-    st.info("Please upload a valid signed license file (`license.json`) to activate Cryptex Lab.")
-    
-    uploaded_file = st.file_uploader("Upload license.json", type=["json"])
-    if uploaded_file is not None:
-        try:
-            content = json.load(uploaded_file)
-            is_valid, verify_err, data = verify_license_data(content, Path("public_key.pem"))
-            if is_valid:
-                with open("license.json", "w", encoding="utf-8") as f:
-                    json.dump(content, f, indent=2)
-                st.success("License activated successfully! Reloading...")
+def page_totp_setup() -> None:
+    """First-run TOTP setup — shown once when totp_secrets.json is absent or incomplete."""
+    render_section_header("🔐", "SECURITY SETUP", "TWO-FACTOR AUTHENTICATION")
+
+    # Generate secrets once per session; survive reruns via session state
+    if "_pending_totp" not in st.session_state:
+        st.session_state["_pending_totp"] = {
+            role: pyotp.random_base32() for role in ["Senior Analyst", "Admin"]
+        }
+    pending: dict[str, str] = st.session_state["_pending_totp"]
+    roles_ordered = ["Senior Analyst", "Admin"]
+    step: int = st.session_state.get("_setup_step", 0)
+
+    open_box("ADMINISTRATOR SETUP REQUIRED")
+    st.markdown(
+        "This workstation has not yet been configured with two-factor authentication.  \n"
+        "Complete the steps below to protect elevated roles.  \n"
+        "**This screen will not appear again once setup is complete.**"
+    )
+    st.caption(
+        "Scan each QR code with your authenticator app (Google Authenticator, Aegis, 2FAS, etc.), "
+        "then enter the 6-digit code shown by the app to confirm the scan was successful."
+    )
+    close_box()
+
+    st.progress(
+        min(step, len(roles_ordered)) / len(roles_ordered),
+        text=f"Step {min(step + 1, len(roles_ordered))} of {len(roles_ordered)}",
+    )
+
+    if step < len(roles_ordered):
+        role = roles_ordered[step]
+        secret = pending[role]
+        uri = pyotp.TOTP(secret).provisioning_uri(name=role, issuer_name="Cryptex Lab")
+
+        open_box(f"STEP {step + 1} OF {len(roles_ordered)} — {role.upper()} 2FA")
+        col_qr, col_info = st.columns([1, 2])
+        with col_qr:
+            try:
+                import qrcode as _qrcode
+                import io as _io
+                _qr = _qrcode.QRCode(box_size=5, border=2)
+                _qr.add_data(uri)
+                _qr.make(fit=True)
+                _img = _qr.make_image(fill_color="black", back_color="white")
+                _buf = _io.BytesIO()
+                _img.save(_buf, format="PNG")
+                st.image(_buf.getvalue(), width=180)
+            except Exception:
+                st.code(uri, language=None)
+
+        with col_info:
+            st.markdown(f"**Role:** `{role}`")
+            st.markdown("**Manual entry key** (use this if QR scanning fails):")
+            st.code(secret, language=None)
+            st.caption("Select **Time-based** (TOTP) when adding manually in your authenticator app.")
+
+        st.markdown("---")
+        code_in = st.text_input(
+            f"Enter the 6-digit code from your authenticator for **{role}**",
+            max_chars=6,
+            placeholder="000000",
+            key=f"_setup_input_{step}",
+        )
+        if st.button(f"Confirm — {role}", type="primary", key=f"_setup_confirm_{step}"):
+            if code_in.strip() and pyotp.TOTP(secret).verify(code_in.strip(), valid_window=1):
+                st.session_state["_setup_step"] = step + 1
                 st.rerun()
             else:
-                st.error(f"Invalid License: {verify_err}")
-        except Exception as e:
-            st.error(f"Error parsing file: {e}")
-            
-    st.markdown("### Or paste license JSON contents:")
-    paste_content = st.text_area("License JSON", height=200)
-    if st.button("ACTIVATE LICENSE"):
-        if paste_content:
+                st.error("Wrong code — check the code in your authenticator app and try again.")
+        close_box()
+
+    else:
+        open_box("ALL ROLES VERIFIED")
+        st.success("Both roles confirmed. Click below to save your configuration and launch the application.")
+        if st.button("Save & Launch", type="primary", use_container_width=True):
+            out: dict = {role: pending[role] for role in TOTP_PROTECTED_ROLES}
+            out["_setup_at"] = datetime.now(timezone.utc).isoformat()
+            Path("totp_secrets.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
+            log_event("ok", "TOTP first-time setup complete — secrets saved locally")
+            st.session_state.pop("_pending_totp", None)
+            st.session_state.pop("_setup_step", None)
+            st.rerun()
+        close_box()
+
+
+def page_license_activation(err_msg: str) -> None:
+    render_section_header("🔑", "LICENSE ACTIVATION", "CRYPTEX LAB")
+
+    from machine_id import get_machine_fingerprint
+    fingerprint = get_machine_fingerprint()
+
+    open_box("STEP 1 — SEND YOUR MACHINE ID TO TITAN CODE")
+    st.markdown("Copy the **Machine ID** below and send it to Titan Code to receive your license key.")
+    st.code(fingerprint, language=None)
+    st.caption("This ID is unique to this machine. Your license will only work here.")
+    close_box()
+
+    open_box("STEP 2 — ENTER YOUR LICENSE KEY")
+    st.markdown("Paste the `CXLAB-...` license key you received from Titan Code.")
+
+    key_input = st.text_area(
+        "License key",
+        height=100,
+        placeholder="CXLAB-eyJ...",
+        label_visibility="collapsed",
+        key="license_key_input",
+    )
+
+    if st.button("Activate License", type="primary", use_container_width=True):
+        raw = key_input.strip()
+        if not raw:
+            st.warning("Paste your license key above first.")
+        else:
             try:
-                content = json.loads(paste_content)
-                is_valid, verify_err, data = verify_license_data(content, Path("public_key.pem"))
+                license_dict = decode_license_key(raw)
+            except ValueError as e:
+                st.error(f"Invalid license key: {e}")
+            else:
+                is_valid, verify_err, _ = verify_license_data(license_dict, Path("public_key.pem"))
                 if is_valid:
+                    st.session_state.pop("_license_cache", None)
                     with open("license.json", "w", encoding="utf-8") as f:
-                        json.dump(content, f, indent=2)
-                    st.success("License activated successfully! Reloading...")
+                        json.dump(license_dict, f, indent=2)
+                    st.success("License activated! Loading...")
                     st.rerun()
                 else:
-                    st.error(f"Invalid License: {verify_err}")
-            except Exception as e:
-                st.error(f"Error parsing JSON: {e}")
-        else:
-            st.warning("Please paste license contents.")
+                    st.error(f"License rejected: {verify_err}")
+
+    close_box()
 
 def render_authorization_workflow(target_page: str) -> None:
     render_section_header("⚠️", "PROCEDURAL AUTHORIZATION REQUIRED", "FORENSIC WORKSTATION AUDIT GATE")
@@ -2959,13 +3038,18 @@ def main() -> None:
     fp_ok, fp_err = verify_machine_fingerprint(license_data)
     if not fp_ok:
         render_header()
+        from machine_id import get_machine_fingerprint
         st.error("MACHINE AUTHORIZATION FAILURE")
         st.warning(fp_err)
-        st.info(
-            "Run `python machine_id.py` on this machine and send the fingerprint "
-            "to Titan Code to obtain a machine-specific license."
-        )
+        st.info("Send the fingerprint below to Titan Code to obtain a license for this machine.")
+        st.code(get_machine_fingerprint(), language=None)
         st.stop()
+
+    # 2c. First-run TOTP setup — must complete before the app is usable
+    if not _has_totp_setup():
+        render_header()
+        page_totp_setup()
+        return
 
     if "current_page" not in st.session_state:
         st.session_state["current_page"] = PAGE_SECURITY_LANDING
@@ -2974,12 +3058,7 @@ def main() -> None:
     render_header()
     render_active_case_banner()
 
-    # 3. TOTP Role Elevation Challenge (intercepts before RBAC)
-    if st.session_state.get("pending_role"):
-        render_totp_challenge()
-        return
-
-    # 4. RBAC (Role-Based Access Control) Page Access Check
+    # 3. RBAC (Role-Based Access Control) Page Access Check
     user_role = st.session_state.get("user_role", "Viewer")
     allowed_pages = ROLES.get(user_role, ROLES["Viewer"])
     if page not in allowed_pages:

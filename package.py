@@ -66,7 +66,6 @@ CLIENT_SUPPORT_FILES = [
     "update.bat",
     "manifest.json",
     "public_key.pem",
-    "license.json",
     "TUTORIAL_CLIENT.md",
 ]
 
@@ -76,6 +75,7 @@ DEVELOPER_ONLY_FILES = [
     "private_key.pem",
     "generate_keys.py",
     "compile_modules.py",
+    "release.py",
     "package.py",
     ".gitignore",
     "TUTORIAL_DEVELOPER.md",

@@ -23,33 +23,24 @@ Welcome to Cryptex Lab, a secure offline forensic workstation for cryptocurrency
 
 ---
 
-## 1. Before You Start — Getting Your License
+## 1. Before You Start — Activating Your License
 
-Cryptex Lab uses a **machine-locked license** — your license file is bound to your specific workstation and will not activate on any other machine. Before your administrator can issue your license, they need your machine's unique hardware fingerprint.
+Cryptex Lab ships **without a license** — like commercial software, you activate it after installation using a license key tied to your specific machine. The application guides you through this in two short steps.
 
-### How to get your fingerprint
+### How activation works
 
-1. Extract the Cryptex Lab ZIP you received to a permanent folder  
+1. Extract the Cryptex Lab ZIP to a permanent folder  
    (e.g., `C:\CryptexLab` on Windows or `~/cryptexlab` on Linux)
-2. Open a terminal in that folder
-3. Run:
-   ```bash
-   python machine_id.py
-   ```
-4. You will see output like:
-   ```
-   Machine Fingerprint:
-     2613bee6eda5f062a3f4d8e1b7c9a0f23d5e4c8b1a6f7e2d9c3b0a4e5f8d1c7
+2. Run the installer, then launch the app (see [Section 3](#3-installation))
+3. The app shows a **LICENSE ACTIVATION** screen automatically — no terminal needed
+4. On that screen, **Step 1** displays your Machine ID — copy it and send it to your Titan Code administrator
+5. Your administrator will send you back:
+   - A **license key** — a long `CXLAB-...` string you paste directly into the app
+   - **Two-factor authentication secrets** for your assigned roles — sent via a **separate secure channel** (not in the same message as the key)
+6. Back in the app, paste the `CXLAB-...` key into **Step 2** and click **Activate License**
+7. The app loads immediately — no file to save, no terminal commands
 
-   Provide this value to your Cryptex Lab administrator when requesting a license.
-   ```
-5. Send the 64-character fingerprint to your Titan Code administrator
-
-Your administrator will then send you back:
-- A `license.json` file (may already be included in your install package if pre-issued)
-- Two-factor authentication secrets for your assigned roles — sent via a **separate secure channel**, not in the same ZIP
-
-> **Important:** Run `machine_id.py` on the exact machine you intend to use. If you move the software to a different computer, you will need a new license.
+> **Important:** Your license key is locked to this machine. If you move the software to a different computer, contact your administrator for a new key.
 
 ---
 
@@ -61,8 +52,8 @@ When you extract `cryptex_lab_client_compiled.zip` you will see:
 |---|---|
 | `*.so` or `*.pyd` files | The security engine — compiled native binaries (not plain Python) |
 | `app.py`, `modes.py`, etc. | Application logic and user interface |
-| `license.json` | Your machine-locked license |
-| `manifest.json` | Cryptographic signature of the application files |
+| `manifest.json` | Cryptographic signature of the application files (pre-shipped) |
+| `manifest.json` | Cryptographic signature of the application files — do not modify |
 | `public_key.pem` | Verification key for the license and manifest |
 | `requirements.txt` | Python package list for the installer |
 | `assets/` | Icons and interface assets |
@@ -127,11 +118,11 @@ If your workstation is network-isolated:
 
 ## 4. Setting Up Two-Factor Authentication (2FA)
 
-Cryptex Lab uses **offline TOTP 2FA** to protect elevated roles such as Senior Analyst and Admin. This is the same standard used by Google Authenticator, Authy, and similar apps. It works entirely offline — your phone never connects to any server.
+Cryptex Lab uses **offline TOTP 2FA** to protect elevated roles (Senior Analyst and Admin). The app guides you through setup automatically on first launch — no secrets are sent by your administrator, and no files need to be transferred.
 
 ### Step 1 — Install an authenticator app
 
-Install any standard TOTP authenticator on your smartphone. Recommended options:
+Before running setup, install any standard TOTP authenticator on your smartphone:
 
 | App | Platform | Notes |
 |---|---|---|
@@ -140,28 +131,24 @@ Install any standard TOTP authenticator on your smartphone. Recommended options:
 | **Google Authenticator** | iOS / Android | Simple, widely supported |
 | **Microsoft Authenticator** | iOS / Android | Enterprise-friendly |
 
-### Step 2 — Add your Cryptex Lab accounts
+All of these work **fully offline** — your phone never connects to any server during use.
 
-Your administrator sends you one or two secrets (depending on your assigned roles). Each secret is either a `otpauth://` URI or a raw base32 string.
+### Step 2 — Complete in-app setup
 
-**Adding via QR code (recommended):**
-1. Paste the `otpauth://` URI into any free QR code generator (search "text to QR code")
-2. Open your authenticator app → Add account → Scan QR code
-3. Scan the generated QR code
+After activating your license, the app shows a **Security Setup** screen automatically.
 
-**Adding manually:**
-1. Open your authenticator app → Add account → Enter key manually
-2. Account name: `Cryptex Lab – Senior Analyst` (or `Cryptex Lab – Admin`)
-3. Key: the base32 secret your administrator provided
-4. Type: **Time-based (TOTP)**
+1. The screen shows a QR code for the **Senior Analyst** role — scan it with your authenticator app
+2. Enter the 6-digit code from your app to confirm the scan worked, then click **Confirm**
+3. Repeat for the **Admin** role
+4. Click **Save & Launch** — setup is complete and the app opens
 
-Repeat for each role secret you were given.
+The 2FA secrets are generated on your machine and stored only in `totp_secrets.json` on this workstation. They are never sent to anyone and cannot be recovered from outside the machine.
 
-### Step 3 — Verify it works
+### Step 3 — Using 2FA day to day
 
-The authenticator app will show a 6-digit code that changes every 30 seconds. When you first launch Cryptex Lab and try to elevate your role, enter this code to verify setup is working.
+Your authenticator app shows a 6-digit code for each role that changes every 30 seconds. When you switch to Senior Analyst or Admin in the sidebar, a dialog appears asking for the current code.
 
-> **Keep your secrets private.** Anyone who has them can generate valid codes. Store them only in your authenticator app. If you believe a secret has been compromised, contact your administrator immediately for a replacement.
+> **Your 2FA is yours.** Only you control the secrets — your administrator cannot generate codes for your roles. If you lose your authenticator device, contact your administrator to reset TOTP setup for this workstation.
 
 ---
 
@@ -332,7 +319,7 @@ Switch modes using the button at the top of the sidebar. The mode indicator is a
 ## 11. Security Practices
 
 - **Never paste a real seed phrase while in LIVE ANALYSIS mode.** The mode switch locks all seed-handling screens, but as a physical discipline: keep secrets off the clipboard and off the screen whenever the network is active.
-- **Do not share your authenticator app secrets** with colleagues. Each user should have their own device registered. Contact your administrator to provision a second device.
+- **Do not share your authenticator app entries** with colleagues. The 2FA secrets are tied to this workstation — each authorized user who needs elevated roles should complete their own setup on their own device. Contact your administrator to reset TOTP if a device is lost or replaced.
 - **Do not take screenshots of seed phrases.** Use the built-in export tools for official records.
 - **Lock your workstation** when stepping away. Your session remains active in the browser tab.
 - **The audit log is permanent.** Every role change, access event, and authorization acknowledgement is written to `audit_logs/audit.jsonl` and cannot be modified from within the application.
@@ -342,10 +329,10 @@ Switch modes using the button at the top of the sidebar. The mode indicator is a
 ## 12. Troubleshooting
 
 ### "MACHINE AUTHORIZATION FAILURE"
-Your `license.json` was issued for a different machine. Run `python machine_id.py`, send the fingerprint to your administrator, and ask for a new license.
+Your license key was issued for a different machine. Open the app — it will show your current Machine ID on the activation screen. Send it to your administrator and ask for a new license key.
 
-### "LICENSE INACTIVE" in the sidebar
-The `license.json` file is missing, expired, or has been tampered with. Contact your administrator for a replacement.
+### "LICENSE INACTIVE" or activation screen on every launch
+The license file is missing, expired, or has been tampered with. Contact your administrator for a new `CXLAB-...` license key and re-activate via the in-app activation screen.
 
 ### "CRITICAL: Build Integrity Check Failed"
 One or more application files have been modified since the build was signed. Do not continue — contact your administrator immediately to receive a verified replacement package.
@@ -362,4 +349,4 @@ Run `python launcher.py` in a terminal and look for error messages. Ensure the v
 Use the sneakernet method: install on an online machine, copy the entire folder including `venv/`, then run `python install.py --skip-deps` on the air-gapped machine. See [Section 3](#3-installation) for details.
 
 ### I reinstalled the operating system — will my license still work?
-Reinstalling the OS changes the `machine-id` used to generate your hardware fingerprint, so your existing license will no longer match. Contact your administrator with the new fingerprint from `python machine_id.py` to receive an updated license.
+Reinstalling the OS changes the hardware fingerprint, so the existing license key will no longer match. Launch the app — it will show the activation screen with your new Machine ID. Send it to your administrator to receive an updated license key.
