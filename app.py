@@ -3522,7 +3522,7 @@ def page_derivation():
         open_box("SUPPORTED COINS")
         coin_lines = []
         for cid, cfg in COIN_REGISTRY.items():
-            coin_lines.append(f"- **{cfg['symbol']}** — {cfg['name']} (`{cfg['purpose']}'/{cfg['coin_type']}'`)")
+            coin_lines.append(f"- **{cfg['symbol']}** — {cfg['label']} (`{cfg['bip_class'].upper()}`)")
         st.markdown("\n".join(coin_lines))
         close_box()
 

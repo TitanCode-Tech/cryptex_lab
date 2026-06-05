@@ -62,6 +62,7 @@ CLIENT_SUPPORT_FILES = [
     "README.md",
     "SECURITY.md",
     "install.py",
+    "download_wheels.py",
     "install.sh",
     "install.bat",
     "uninstall.py",
@@ -73,6 +74,7 @@ CLIENT_SUPPORT_FILES = [
     "manifest.json",
     "public_key.pem",
     "TUTORIAL_CLIENT.md",
+    "dist/CRYPTEX_LAB_Client_Guide.pdf",
 ]
 
 CLIENT_DIRS = ["assets", ".streamlit"]
@@ -83,6 +85,7 @@ DEVELOPER_ONLY_FILES = [
     "compile_modules.py",
     "release.py",
     "package.py",
+    "generate_tutorial_pdf.py",
     ".gitignore",
     "TUTORIAL_DEVELOPER.md",
 ]

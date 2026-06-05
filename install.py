@@ -106,15 +106,33 @@ def create_venv() -> None:
     builder.create(str(venv_dir()))
 
 
-def install_requirements() -> None:
+def install_requirements(offline: bool = False) -> None:
     req = ROOT / "requirements.txt"
     if not req.exists():
         raise SystemExit(f"requirements.txt not found at {req}")
-    step("Installing dependencies (this is the only online step)")
-    cmd = [str(venv_python()), "-m", "pip", "install", "--upgrade", "pip"]
-    subprocess.check_call(cmd)
-    cmd = [str(venv_python()), "-m", "pip", "install", "-r", str(req)]
-    subprocess.check_call(cmd)
+
+    if offline:
+        wheels_dir = ROOT / "offline_wheels"
+        if not wheels_dir.exists() or not any(wheels_dir.iterdir()):
+            raise SystemExit(
+                f"offline_wheels/ not found or empty at {wheels_dir}.\n"
+                "Run 'python download_wheels.py' on an internet-connected machine first,\n"
+                "then copy the offline_wheels/ folder here."
+            )
+        step("Installing dependencies from offline_wheels/ (no internet required)")
+        cmd = [str(venv_python()), "-m", "pip", "install", "--upgrade", "--no-index",
+               "--find-links", str(wheels_dir), "pip"]
+        subprocess.run(cmd)  # pip self-upgrade may not be in wheels; non-fatal
+        cmd = [str(venv_python()), "-m", "pip", "install",
+               "--no-index", "--find-links", str(wheels_dir),
+               "-r", str(req)]
+        subprocess.check_call(cmd)
+    else:
+        step("Installing dependencies (this is the only online step)")
+        cmd = [str(venv_python()), "-m", "pip", "install", "--upgrade", "pip"]
+        subprocess.check_call(cmd)
+        cmd = [str(venv_python()), "-m", "pip", "install", "-r", str(req)]
+        subprocess.check_call(cmd)
 
 
 # ---------------------------------------------------------------------------
@@ -256,8 +274,11 @@ def create_shortcuts() -> list[Path]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=f"Install {APP_NAME}.")
     parser.add_argument("--skip-deps", action="store_true",
-                        help="Skip pip install (use on offline machine "
-                             "after sneakernet copy).")
+                        help="Skip pip install (use when the venv is already populated).")
+    parser.add_argument("--offline", action="store_true",
+                        help="Install from offline_wheels/ instead of PyPI. "
+                             "Requires running download_wheels.py first on an "
+                             "internet-connected machine.")
     parser.add_argument("--no-shortcut", action="store_true",
                         help="Do not create a desktop shortcut.")
     args = parser.parse_args(argv)
@@ -267,10 +288,12 @@ def main(argv: list[str] | None = None) -> int:
 
     create_venv()
 
-    if not args.skip_deps:
-        install_requirements()
-    else:
+    if args.skip_deps:
         info("--skip-deps: not running pip. Existing venv is assumed populated.")
+    elif args.offline:
+        install_requirements(offline=True)
+    else:
+        install_requirements(offline=False)
 
     created: list[Path] = []
     if not args.no_shortcut:

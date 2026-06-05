@@ -43,3 +43,6 @@ manifest.json
 license.json
 totp_secrets.json
 
+
+# Downloaded dependency wheels (platform-specific, large)
+offline_wheels/
