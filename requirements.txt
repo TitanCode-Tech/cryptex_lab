@@ -38,3 +38,4 @@ pyotp==2.9.0
 cython==3.2.5
 setuptools>=68.0
 
+shamir-mnemonic>=0.3.0

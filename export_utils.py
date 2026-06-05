@@ -32,6 +32,7 @@ and no external services are contacted.
 
 from __future__ import annotations
 
+import hashlib
 import io
 from datetime import datetime, timezone
 from typing import Iterable, Union
@@ -42,15 +43,17 @@ from fpdf import FPDF
 
 
 _TOOL_NAME = "CRYPTEX LAB"
+_VERSION = "2.0"
 
 _REPORT_FIELDS = ("coin", "address_type", "path", "address")
 
 _FORBIDDEN_KEYS = {
     "mnemonic", "seed", "entropy", "private_key", "privatekey",
     "private", "secret", "passphrase", "xprv",
+    "wif", "master_secret", "master_secret_hex",
 }
 
-_DISCLAIMER = "No secrets included: this report contains only public addresses."
+_DISCLAIMER = "FORENSIC REPORT - No private keys or secrets are included in this document."
 
 _MAX_QR_INPUT = 200
 
@@ -149,44 +152,175 @@ def _latin1(text: str) -> str:
     return text.encode("latin-1", errors="replace").decode("latin-1")
 
 
-def build_pdf_report(records: Iterable[dict], notes: str = "") -> bytes:
+def build_pdf_report(
+    records: Iterable[dict],
+    notes: str = "",
+    case_info: dict | None = None,
+    findings: list[dict] | None = None,
+) -> bytes:
+    """
+    Build a forensic-grade PDF report.
+
+    Parameters
+    ----------
+    records : Iterable[dict]
+        Derivation records (coin, address_type, path, address).
+    notes : str
+        Free-text examiner notes (no secrets).
+    case_info : dict | None
+        Optional: {id, name, investigator, chain, opened_at}
+    findings : list[dict] | None
+        Optional non-address findings, e.g. from BIP38/Electrum/brain wallet.
+        Each dict: {tool, result, detail}
+    """
     safe = _prepare(records)
     ts = _timestamp()
+    findings = findings or []
 
     pdf = FPDF(orientation="P", unit="mm", format="A4")
-    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.set_auto_page_break(auto=True, margin=20)
+    pdf.set_margins(15, 15, 15)
+
+    # ── Header / footer callback ────────────────────────────────────────────
+    class _FPDFForensic(FPDF):
+        def header(self):
+            self.set_font("Helvetica", style="B", size=9)
+            self.set_text_color(80, 80, 80)
+            self.cell(0, 6, _latin1(f"{_TOOL_NAME} v{_VERSION} - FORENSIC RECOVERY REPORT"),
+                      new_x="LMARGIN", new_y="NEXT", align="C")
+            self.set_draw_color(40, 40, 40)
+            self.line(15, self.get_y(), 195, self.get_y())
+            self.ln(2)
+
+        def footer(self):
+            self.set_y(-15)
+            self.set_font("Helvetica", style="I", size=8)
+            self.set_text_color(120, 120, 120)
+            self.cell(0, 5, _latin1(f"Page {self.page_no()} | {_DISCLAIMER}"), align="C")
+
+    pdf = _FPDFForensic(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=20)
+    pdf.set_margins(15, 15, 15)
     pdf.add_page()
 
-    pdf.set_font("helvetica", style="B", size=16)
-    pdf.cell(0, 10, _latin1(f"{_TOOL_NAME} - Recovery Report"), new_x="LMARGIN", new_y="NEXT")
-
-    pdf.set_font("helvetica", size=10)
-    pdf.cell(0, 6, _latin1(f"Generated (UTC): {ts}"), new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(0, 6, _latin1(f"Total addresses: {len(safe)}"), new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("helvetica", style="I", size=9)
-    pdf.cell(0, 6, _latin1(_DISCLAIMER), new_x="LMARGIN", new_y="NEXT")
+    # ── Title block ─────────────────────────────────────────────────────────
+    pdf.set_font("Helvetica", style="B", size=18)
+    pdf.set_text_color(0, 0, 0)
+    pdf.cell(0, 12, "FORENSIC RECOVERY REPORT", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.set_font("Helvetica", size=10)
+    pdf.set_text_color(80, 80, 80)
+    pdf.cell(0, 6, _latin1(f"Generated (UTC): {ts}"), new_x="LMARGIN", new_y="NEXT", align="C")
     pdf.ln(4)
 
-    # Table header
-    pdf.set_font("helvetica", style="B", size=10)
-    pdf.cell(20, 7, "Coin", border=1)
-    pdf.cell(45, 7, "Type", border=1)
-    pdf.cell(50, 7, "Path", border=1)
-    pdf.cell(75, 7, "Address", border=1, new_x="LMARGIN", new_y="NEXT")
+    # ── Case information ────────────────────────────────────────────────────
+    if case_info:
+        pdf.set_font("Helvetica", style="B", size=12)
+        pdf.set_text_color(0, 0, 0)
+        pdf.cell(0, 8, "CASE INFORMATION", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_draw_color(0, 0, 0)
+        pdf.line(15, pdf.get_y(), 195, pdf.get_y())
+        pdf.ln(2)
+        pdf.set_font("Helvetica", size=10)
+        fields = [
+            ("Case ID", case_info.get("id", "N/A")),
+            ("Case Name", case_info.get("name", "N/A")),
+            ("Investigator", case_info.get("investigator", "N/A")),
+            ("Blockchain / Network", case_info.get("chain", "N/A")),
+            ("Case Opened", case_info.get("opened_at", "N/A")),
+        ]
+        for label, value in fields:
+            pdf.set_font("Helvetica", style="B", size=10)
+            pdf.cell(50, 6, _latin1(f"{label}:"))
+            pdf.set_font("Helvetica", size=10)
+            pdf.cell(0, 6, _latin1(str(value)), new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(4)
 
-    pdf.set_font("helvetica", size=8)
+    # ── Examiner notes ───────────────────────────────────────────────────────
+    if notes.strip():
+        pdf.set_font("Helvetica", style="B", size=12)
+        pdf.cell(0, 8, "EXAMINER NOTES", new_x="LMARGIN", new_y="NEXT")
+        pdf.line(15, pdf.get_y(), 195, pdf.get_y())
+        pdf.ln(2)
+        pdf.set_font("Helvetica", size=10)
+        pdf.multi_cell(0, 5, _latin1(notes.strip()))
+        pdf.ln(4)
+
+    # ── Non-address findings (BIP38, Electrum, Brain Wallet, etc.) ──────────
+    if findings:
+        pdf.set_font("Helvetica", style="B", size=12)
+        pdf.cell(0, 8, "RECOVERY FINDINGS", new_x="LMARGIN", new_y="NEXT")
+        pdf.line(15, pdf.get_y(), 195, pdf.get_y())
+        pdf.ln(2)
+        for f in findings:
+            pdf.set_font("Helvetica", style="B", size=10)
+            pdf.cell(0, 6, _latin1(f"Tool: {f.get('tool', 'Unknown')}"), new_x="LMARGIN", new_y="NEXT")
+            pdf.set_font("Helvetica", size=10)
+            pdf.cell(0, 6, _latin1(f"Result: {f.get('result', '')}"), new_x="LMARGIN", new_y="NEXT")
+            if f.get("detail"):
+                pdf.set_font("Helvetica", style="I", size=9)
+                pdf.multi_cell(0, 5, _latin1(str(f["detail"])))
+            pdf.ln(2)
+        pdf.ln(2)
+
+    # ── Derived address table ────────────────────────────────────────────────
+    if safe:
+        pdf.set_font("Helvetica", style="B", size=12)
+        pdf.cell(0, 8, f"DERIVED ADDRESSES ({len(safe)} entries)", new_x="LMARGIN", new_y="NEXT")
+        pdf.line(15, pdf.get_y(), 195, pdf.get_y())
+        pdf.ln(2)
+
+        # Column widths: coin=20, type=38, path=48, address=74
+        col_w = (20, 38, 48, 74)
+        headers = ("Coin", "Type", "Path", "Address")
+        pdf.set_font("Helvetica", style="B", size=9)
+        pdf.set_fill_color(220, 220, 220)
+        for w, h in zip(col_w, headers):
+            pdf.cell(w, 7, h, border=1, fill=True)
+        pdf.ln()
+
+        pdf.set_font("Helvetica", size=8)
+        for row in safe:
+            vals = (
+                str(row["coin"]),
+                str(row["address_type"])[:35],
+                str(row["path"]),
+                str(row["address"]),
+            )
+            for w, v in zip(col_w, vals):
+                pdf.cell(w, 6, _latin1(v[:int(w / 2.1)]), border=1)
+            pdf.ln()
+        pdf.ln(4)
+
+    # ── Evidence integrity hash ───────────────────────────────────────────────
+    # Build a canonical string of all exported data, hash it, and include it.
+    # This allows verifying the report was not modified after generation.
+    integrity_body = ts + "|" + notes + "|"
+    if case_info:
+        integrity_body += str(sorted(case_info.items()))
     for row in safe:
-        pdf.cell(20, 6, _latin1(str(row["coin"])), border=1)
-        pdf.cell(45, 6, _latin1(str(row["address_type"]))[:40], border=1)
-        pdf.cell(50, 6, _latin1(str(row["path"])), border=1)
-        pdf.cell(75, 6, _latin1(str(row["address"])), border=1, new_x="LMARGIN", new_y="NEXT")
+        integrity_body += str(row)
+    for f in findings:
+        integrity_body += str(f)
+    integrity_hash = hashlib.sha256(integrity_body.encode("utf-8")).hexdigest()
 
-    if notes:
-        pdf.ln(6)
-        pdf.set_font("helvetica", style="B", size=11)
-        pdf.cell(0, 7, "Notes", new_x="LMARGIN", new_y="NEXT")
-        pdf.set_font("helvetica", size=10)
-        pdf.multi_cell(0, 5, _latin1(notes))
+    pdf.set_font("Helvetica", style="B", size=12)
+    pdf.cell(0, 8, "EVIDENCE INTEGRITY", new_x="LMARGIN", new_y="NEXT")
+    pdf.line(15, pdf.get_y(), 195, pdf.get_y())
+    pdf.ln(2)
+    pdf.set_font("Helvetica", size=9)
+    pdf.multi_cell(0, 5,
+        "The SHA-256 hash below covers the timestamp, case details, notes, and all "
+        "exported address records. Use it to verify this document has not been modified."
+    )
+    pdf.ln(2)
+    pdf.set_font("Courier", style="B", size=9)
+    pdf.cell(0, 6, _latin1(f"SHA-256: {integrity_hash}"), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", style="I", size=8)
+    pdf.set_text_color(100, 100, 100)
+    pdf.cell(0, 5,
+        _latin1("Re-hash: sha256(timestamp + '|' + notes + '|' + case_info + address_rows + findings)"),
+        new_x="LMARGIN", new_y="NEXT",
+    )
 
     return bytes(pdf.output())
 

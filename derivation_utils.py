@@ -31,6 +31,214 @@ from bip_utils import (
     WifEncoder,
 )
 
+# ---------------------------------------------------------------------------
+# Multi-coin registry
+# ---------------------------------------------------------------------------
+# Each entry maps a stable coin_id → derivation config.
+# "bip_class" is one of "bip44" / "bip49" / "bip84".
+# "evm_note" (optional) means the address is identical on listed EVM chains.
+
+COIN_REGISTRY: dict[str, dict] = {
+    # ── Ethereum & EVM-compatible chains ───────────────────────────────────
+    "ETH": {
+        "label": "Ethereum",
+        "symbol": "ETH",
+        "coin_type": 60,
+        "bip_class": "bip44",
+        "coin_enum": Bip44Coins.ETHEREUM,
+        "evm_note": "Same address valid on BSC, Polygon, Avalanche-C, Arbitrum, Optimism",
+    },
+    # ── Bitcoin address variants ───────────────────────────────────────────
+    "BTC_NATIVE": {
+        "label": "Bitcoin (Native SegWit / bc1)",
+        "symbol": "BTC",
+        "coin_type": 0,
+        "bip_class": "bip84",
+        "coin_enum": Bip84Coins.BITCOIN,
+    },
+    "BTC_SEGWIT": {
+        "label": "Bitcoin (SegWit / 3…)",
+        "symbol": "BTC",
+        "coin_type": 0,
+        "bip_class": "bip49",
+        "coin_enum": Bip49Coins.BITCOIN,
+    },
+    "BTC_LEGACY": {
+        "label": "Bitcoin (Legacy / 1…)",
+        "symbol": "BTC",
+        "coin_type": 0,
+        "bip_class": "bip44",
+        "coin_enum": Bip44Coins.BITCOIN,
+    },
+    # ── Litecoin ───────────────────────────────────────────────────────────
+    "LTC_NATIVE": {
+        "label": "Litecoin (Native SegWit / ltc1)",
+        "symbol": "LTC",
+        "coin_type": 2,
+        "bip_class": "bip84",
+        "coin_enum": Bip84Coins.LITECOIN,
+    },
+    "LTC_SEGWIT": {
+        "label": "Litecoin (SegWit / M…)",
+        "symbol": "LTC",
+        "coin_type": 2,
+        "bip_class": "bip49",
+        "coin_enum": Bip49Coins.LITECOIN,
+    },
+    "LTC_LEGACY": {
+        "label": "Litecoin (Legacy / L…)",
+        "symbol": "LTC",
+        "coin_type": 2,
+        "bip_class": "bip44",
+        "coin_enum": Bip44Coins.LITECOIN,
+    },
+    # ── Other UTXO coins ───────────────────────────────────────────────────
+    "DOGE": {
+        "label": "Dogecoin",
+        "symbol": "DOGE",
+        "coin_type": 3,
+        "bip_class": "bip44",
+        "coin_enum": Bip44Coins.DOGECOIN,
+    },
+    # ── Account-model chains ───────────────────────────────────────────────
+    "XRP": {
+        "label": "XRP (Ripple)",
+        "symbol": "XRP",
+        "coin_type": 144,
+        "bip_class": "bip44",
+        "coin_enum": Bip44Coins.RIPPLE,
+    },
+    "TRX": {
+        "label": "Tron",
+        "symbol": "TRX",
+        "coin_type": 195,
+        "bip_class": "bip44",
+        "coin_enum": Bip44Coins.TRON,
+    },
+    "SOL": {
+        "label": "Solana",
+        "symbol": "SOL",
+        "coin_type": 501,
+        "bip_class": "bip44",
+        "coin_enum": Bip44Coins.SOLANA,
+    },
+    "ATOM": {
+        "label": "Cosmos (ATOM)",
+        "symbol": "ATOM",
+        "coin_type": 118,
+        "bip_class": "bip44",
+        "coin_enum": Bip44Coins.COSMOS,
+    },
+    "BNB": {
+        "label": "BNB Beacon Chain",
+        "symbol": "BNB",
+        "coin_type": 714,
+        "bip_class": "bip44",
+        "coin_enum": Bip44Coins.BINANCE_CHAIN,
+    },
+}
+
+# Logical coin groups for the UI multi-select.
+COIN_GROUPS: dict[str, list[str]] = {
+    "EVM Chains (ETH / BSC / Polygon / Avalanche-C / Arbitrum / Optimism)": ["ETH"],
+    "Bitcoin": ["BTC_NATIVE", "BTC_SEGWIT", "BTC_LEGACY"],
+    "Litecoin": ["LTC_NATIVE", "LTC_SEGWIT", "LTC_LEGACY"],
+    "Dogecoin": ["DOGE"],
+    "XRP / Ripple": ["XRP"],
+    "Tron (TRX)": ["TRX"],
+    "Solana (SOL)": ["SOL"],
+    "Cosmos (ATOM)": ["ATOM"],
+    "BNB Beacon Chain": ["BNB"],
+}
+
+# Default coin set for "scan everything" operations.
+DEFAULT_SCAN_COINS: list[str] = [
+    "ETH", "BTC_NATIVE", "BTC_SEGWIT", "BTC_LEGACY",
+    "LTC_NATIVE", "LTC_LEGACY", "DOGE", "XRP", "TRX", "SOL", "ATOM",
+]
+
+# ---------------------------------------------------------------------------
+# Hardware wallet path presets
+# ---------------------------------------------------------------------------
+# Each preset maps to a list of scan specs:
+#   {"coin_id": str, "accounts": list[int], "count": int}
+# where "accounts" is which BIP44 account indices to scan.
+
+HARDWARE_WALLET_PRESETS: dict[str, dict] = {
+    "Ledger Live — ETH / EVM": {
+        "description": (
+            "Ledger Live (post-2019) uses per-account paths. "
+            "Accounts 0-3 are scanned at index 0 of each."
+        ),
+        "note": "Also covers BSC, Polygon, Avalanche-C, Arbitrum, Optimism (same address).",
+        "specs": [{"coin_id": "ETH", "accounts": [0, 1, 2, 3], "count": 3}],
+    },
+    "Ledger Legacy — ETH": {
+        "description": (
+            "Old Ledger Ethereum app (pre-2019). "
+            "Uses m/44'/60'/0'/index — index-based, not account-based."
+        ),
+        "note": "Try this if Ledger Live preset doesn't find your address.",
+        "specs": [{"coin_id": "ETH", "accounts": [0], "count": 20}],
+        "path_style": "legacy_eth",
+    },
+    "Ledger Live — BTC (All Types)": {
+        "description": "Ledger Live Bitcoin: native segwit, segwit, and legacy. Accounts 0-3.",
+        "specs": [
+            {"coin_id": "BTC_NATIVE", "accounts": [0, 1, 2, 3], "count": 3},
+            {"coin_id": "BTC_SEGWIT", "accounts": [0, 1, 2, 3], "count": 3},
+            {"coin_id": "BTC_LEGACY", "accounts": [0, 1, 2, 3], "count": 3},
+        ],
+    },
+    "Trezor Suite — ETH": {
+        "description": "Trezor standard Ethereum — m/44'/60'/0'/0/index.",
+        "specs": [{"coin_id": "ETH", "accounts": [0], "count": 10}],
+    },
+    "Trezor Suite — BTC (All Types)": {
+        "description": "Trezor BTC: native segwit, segwit, legacy. Account 0.",
+        "specs": [
+            {"coin_id": "BTC_NATIVE", "accounts": [0], "count": 5},
+            {"coin_id": "BTC_SEGWIT", "accounts": [0], "count": 5},
+            {"coin_id": "BTC_LEGACY", "accounts": [0], "count": 5},
+        ],
+    },
+    "MetaMask / Coinbase Wallet / Trust Wallet (EVM)": {
+        "description": "Standard EVM path: m/44'/60'/0'/0/index. Addresses 0-9.",
+        "note": "Address is identical on ETH, BSC, Polygon, Avalanche-C, Arbitrum, Optimism.",
+        "specs": [{"coin_id": "ETH", "accounts": [0], "count": 10}],
+    },
+    "Trust Wallet — Full Multi-chain": {
+        "description": "Trust Wallet derives all major coins from the same seed.",
+        "specs": [
+            {"coin_id": "ETH",       "accounts": [0], "count": 5},
+            {"coin_id": "BTC_NATIVE","accounts": [0], "count": 5},
+            {"coin_id": "BTC_LEGACY","accounts": [0], "count": 5},
+            {"coin_id": "LTC_NATIVE","accounts": [0], "count": 5},
+            {"coin_id": "DOGE",      "accounts": [0], "count": 5},
+            {"coin_id": "XRP",       "accounts": [0], "count": 5},
+            {"coin_id": "TRX",       "accounts": [0], "count": 5},
+            {"coin_id": "SOL",       "accounts": [0], "count": 5},
+            {"coin_id": "ATOM",      "accounts": [0], "count": 5},
+        ],
+    },
+    "Coldcard / Jade / BitBox02 (BTC only)": {
+        "description": "Bitcoin-only hardware wallets. Native segwit primary, segwit secondary.",
+        "specs": [
+            {"coin_id": "BTC_NATIVE", "accounts": [0], "count": 10},
+            {"coin_id": "BTC_SEGWIT", "accounts": [0], "count": 5},
+        ],
+    },
+    "KeepKey": {
+        "description": "KeepKey standard paths — equivalent to Trezor.",
+        "specs": [
+            {"coin_id": "ETH",       "accounts": [0], "count": 5},
+            {"coin_id": "BTC_NATIVE","accounts": [0], "count": 5},
+            {"coin_id": "BTC_SEGWIT","accounts": [0], "count": 5},
+            {"coin_id": "BTC_LEGACY","accounts": [0], "count": 5},
+        ],
+    },
+}
+
 from wallet_utils import (
     BTC_ADDRESS_TYPES,
     ETH_PATH_TEMPLATE,
@@ -267,4 +475,183 @@ def find_address_match(
         "searched": len(candidates),
         "candidates": candidates,
         "target": target,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Multi-coin derivation (uses COIN_REGISTRY)
+# ---------------------------------------------------------------------------
+
+def derive_coin_addresses(
+    mnemonic: str,
+    coin_id: str,
+    account: int = 0,
+    change: int = 0,
+    start_index: int = 0,
+    count: int = 5,
+) -> list[dict]:
+    """
+    Derive addresses for any coin in COIN_REGISTRY.
+
+    Parameters
+    ----------
+    mnemonic  : BIP39 mnemonic string.
+    coin_id   : Key from COIN_REGISTRY (e.g. "ETH", "BTC_NATIVE", "LTC_LEGACY").
+    account   : BIP44 account level (default 0).
+    change    : 0 = external (receiving), 1 = internal (change).
+    start_index, count : address window.
+
+    Returns
+    -------
+    list of dicts with keys: coin, coin_id, label, path, address, account, index.
+    """
+    if coin_id not in COIN_REGISTRY:
+        raise ValueError(
+            f"Unknown coin_id {coin_id!r}. Available: {list(COIN_REGISTRY.keys())}"
+        )
+    count = min(count, MAX_ADDRESSES_PER_REQUEST)
+    cfg = COIN_REGISTRY[coin_id]
+    seed = _seed(mnemonic)
+    try:
+        bip_cls_name = cfg["bip_class"]
+        coin_enum = cfg["coin_enum"]
+        coin_type = cfg["coin_type"]
+        bip_num = {"bip44": 44, "bip49": 49, "bip84": 84}[bip_cls_name]
+
+        if bip_cls_name == "bip44":
+            ctx = Bip44.FromSeed(seed, coin_enum)
+        elif bip_cls_name == "bip49":
+            ctx = Bip49.FromSeed(seed, coin_enum)
+        elif bip_cls_name == "bip84":
+            ctx = Bip84.FromSeed(seed, coin_enum)
+        else:
+            raise ValueError(f"Unknown bip_class {bip_cls_name!r}")
+
+        acct_ctx = ctx.Purpose().Coin().Account(account).Change(
+            Bip44Changes.CHAIN_EXT if change == 0 else Bip44Changes.CHAIN_INT
+        )
+
+        out: list[dict] = []
+        for i in range(start_index, start_index + count):
+            address = acct_ctx.AddressIndex(i).PublicKey().ToAddress()
+            path = f"m/{bip_num}'/{coin_type}'/{account}'/{change}/{i}"
+            out.append({
+                "coin": cfg["symbol"],
+                "coin_id": coin_id,
+                "label": cfg["label"],
+                "path": path,
+                "address": address,
+                "account": account,
+                "index": i,
+                "evm_note": cfg.get("evm_note", ""),
+            })
+        return out
+    finally:
+        del seed
+
+
+def find_address_match_extended(
+    mnemonic: str,
+    target_address: str,
+    coin_ids: list[str] | None = None,
+    count_per_coin: int = 10,
+    scan_accounts: int = 1,
+) -> dict:
+    """
+    Search for target_address across multiple coins and accounts.
+
+    Parameters
+    ----------
+    coin_ids      : Subset of COIN_REGISTRY keys. None = DEFAULT_SCAN_COINS.
+    count_per_coin: Addresses to derive per coin per account.
+    scan_accounts : Number of account indices to check (0 … scan_accounts-1).
+
+    Returns
+    -------
+    dict with: match (dict | None), searched (int), candidates (list), target (str).
+    """
+    if not isinstance(target_address, str) or not target_address.strip():
+        raise ValueError("target_address must be a non-empty string")
+
+    if coin_ids is None:
+        coin_ids = DEFAULT_SCAN_COINS
+
+    target = target_address.strip()
+    all_candidates: list[dict] = []
+    match: dict | None = None
+
+    for coin_id in coin_ids:
+        if coin_id not in COIN_REGISTRY:
+            continue
+        for account in range(scan_accounts):
+            try:
+                addresses = derive_coin_addresses(
+                    mnemonic, coin_id,
+                    account=account,
+                    count=count_per_coin,
+                )
+                all_candidates.extend(addresses)
+                for a in addresses:
+                    if a["address"].lower() == target.lower():
+                        match = a
+                        break
+            except Exception:
+                pass
+            if match:
+                break
+        if match:
+            break
+
+    return {
+        "match": match,
+        "searched": len(all_candidates),
+        "candidates": all_candidates,
+        "target": target,
+    }
+
+
+def run_hardware_preset(
+    mnemonic: str,
+    preset_name: str,
+    target_address: str | None = None,
+) -> dict:
+    """
+    Run derivation for a named HARDWARE_WALLET_PRESETS entry.
+
+    Returns dict with: candidates (list), match (dict|None), preset (str).
+    """
+    if preset_name not in HARDWARE_WALLET_PRESETS:
+        raise ValueError(f"Unknown preset {preset_name!r}")
+
+    preset = HARDWARE_WALLET_PRESETS[preset_name]
+    all_candidates: list[dict] = []
+    match: dict | None = None
+    target = (target_address or "").strip()
+
+    for spec in preset["specs"]:
+        coin_id = spec["coin_id"]
+        accounts = spec.get("accounts", [0])
+        count = spec.get("count", 5)
+        for account in accounts:
+            try:
+                rows = derive_coin_addresses(mnemonic, coin_id, account=account, count=count)
+                all_candidates.extend(rows)
+                if target:
+                    for r in rows:
+                        if r["address"].lower() == target.lower():
+                            match = r
+                            break
+            except Exception:
+                pass
+            if match:
+                break
+        if match:
+            break
+
+    return {
+        "candidates": all_candidates,
+        "match": match,
+        "preset": preset_name,
+        "description": preset.get("description", ""),
+        "note": preset.get("note", ""),
     }

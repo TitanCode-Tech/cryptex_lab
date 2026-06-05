@@ -52,8 +52,56 @@ from recovery_utils import (
     estimate_recovery_time,
     MAX_MISSING_WORDS,
     MAX_ORDER_POSITIONS,
+    _expand_pattern,
+    _WILDCARD,
+    _UNKNOWN_TOKEN as _REC_UNKNOWN_TOKEN,
+    _SEARCH_SPACE_CAP,
 )
-from derivation_utils import find_address_match, compare_all_standards
+from derivation_utils import (
+    find_address_match,
+    compare_all_standards,
+    COIN_REGISTRY,
+    COIN_GROUPS,
+    HARDWARE_WALLET_PRESETS,
+    DEFAULT_SCAN_COINS,
+    derive_coin_addresses,
+    find_address_match_extended,
+    run_hardware_preset,
+)
+from passphrase_utils import (
+    build_candidate_list,
+    recover_passphrase,
+    estimate_candidate_count,
+    MUTATION_RULES,
+    CANDIDATE_WARN_THRESHOLD,
+)
+from bip38_utils import decrypt_bip38, attack_bip38
+from xpub_utils import (
+    detect_extended_key_type,
+    derive_from_extended_key,
+    find_address_in_extended_key,
+    extended_key_info,
+)
+from slip39_utils import (
+    validate_share,
+    combine_shares,
+    find_address_in_shares,
+    recover_slip39_passphrase,
+)
+from electrum_utils import (
+    detect_electrum_version,
+    derive_electrum_addresses,
+    derive_electrum_v1_addresses,
+    derive_electrum_v2_addresses,
+    find_electrum_address,
+    recover_electrum_v2_passphrase,
+)
+from brain_wallet_utils import (
+    brain_wallet_all,
+    brain_wallet_btc,
+    brain_wallet_eth,
+    attack_brain_wallet,
+)
 from forensic_utils import inspect_metamask_vault, identify_wallet_file
 from hash_utils import (
     calculate_sha256,
@@ -124,11 +172,18 @@ PAGE_INCOMPLETE_SEED = "Incomplete Seed Recovery"
 PAGE_TYPO_LAB = "Typo Correction Lab"
 PAGE_WRONG_ORDER = "Wrong Word Order Helper"
 PAGE_PASSPHRASE = "BIP39 Passphrase Testing"
+PAGE_PASSPHRASE_ATTACK = "Passphrase Recovery Attack"
 PAGE_DERIVATION = "Derivation Path Scanner"
 PAGE_ADDRESS_MATCHER = "Known Address Matcher"
 PAGE_ADDRESS_GEN = "ETH/BTC Address Generator"
 PAGE_ENTROPY = "Entropy Analysis Lab"
 PAGE_VAULT_INSPECT = "MetaMask Vault Inspector"
+PAGE_BIP38 = "BIP38 Encrypted Key Tool"
+PAGE_ELECTRUM = "Electrum Wallet Recovery"
+PAGE_BRAIN_WALLET = "Brain Wallet Recovery"
+PAGE_KEY_IMPORT = "Key Importer"
+PAGE_XPUB = "xpub / xprv Key Tool"
+PAGE_SLIP39 = "SLIP39 Share Recovery"
 
 PAGE_LIVE_ADDR = "Live Address Lookup"
 PAGE_LIVE_TX = "Live TX Lookup"
@@ -156,6 +211,13 @@ PAGE_ICONS = {
     PAGE_ADDRESS_GEN: "\U0001F4B3",
     PAGE_ENTROPY: "\U0001F3B2",
     PAGE_VAULT_INSPECT: "\U0001F98A",
+    PAGE_PASSPHRASE_ATTACK: "\U0001F4A5",
+    PAGE_KEY_IMPORT: "\U0001F5DD",
+    PAGE_XPUB: "\U0001F4CE",
+    PAGE_SLIP39: "\U0001F9E9",
+    PAGE_BIP38: "\U0001F512",
+    PAGE_ELECTRUM: "\U000026A1",
+    PAGE_BRAIN_WALLET: "\U0001F9E0",
     PAGE_LIVE_ADDR: "\U0001F4E1",
     PAGE_LIVE_TX: "\U0001F4E1",
     PAGE_HASH_TOOLS: "\U0001F9EE",
@@ -870,6 +932,13 @@ NAV_GROUPS_OFFLINE = [
         PAGE_TYPO_LAB,
         PAGE_WRONG_ORDER,
         PAGE_PASSPHRASE,
+        PAGE_PASSPHRASE_ATTACK,
+        PAGE_KEY_IMPORT,
+        PAGE_XPUB,
+        PAGE_SLIP39,
+        PAGE_BIP38,
+        PAGE_ELECTRUM,
+        PAGE_BRAIN_WALLET,
     ]),
     ("FORENSICS", [
         PAGE_BIP39_VALIDATION,
@@ -1252,12 +1321,19 @@ def page_recovery_selector():
     )
     grid = st.columns(2)
     items = [
-        ("Missing 1-2 Words", "Brute-force the unknown slots while checking a target address.", PAGE_INCOMPLETE_SEED, "purple"),
+        ("Missing / Partial Words", "Brute-force unknown slots; support prefix/suffix patterns (aban*).", PAGE_INCOMPLETE_SEED, "purple"),
         ("Misspelled Words", "Levenshtein suggestions against the BIP39 wordlist.", PAGE_TYPO_LAB, "orange"),
         ("Words Out of Order", f"Permute up to {MAX_ORDER_POSITIONS} words to find a valid checksum.", PAGE_WRONG_ORDER, "cyan"),
-        ("Forgot Passphrase", "Test a candidate BIP39 passphrase against a target address.", PAGE_PASSPHRASE, "green"),
-        ("Unknown Path", "Compare a mnemonic across all standard BIP44/49/84 paths.", PAGE_DERIVATION, "cyan"),
-        ("Address Match Search", "Search the standard window for a known address.", PAGE_ADDRESS_MATCHER, "purple"),
+        ("Forgot Passphrase (Single)", "Test one BIP39 passphrase against a target address.", PAGE_PASSPHRASE, "green"),
+        ("Passphrase Attack", "Wordlist + mutation rules. Tests thousands of BIP39 passphrase candidates.", PAGE_PASSPHRASE_ATTACK, "red"),
+        ("Unknown Path / Multi-coin", "Scan ETH, BTC, LTC, DOGE, XRP, TRX, SOL, ATOM + hardware presets.", PAGE_ADDRESS_MATCHER, "purple"),
+        ("Derivation Path Scanner", "Compare a mnemonic across all BIP44/49/84 paths.", PAGE_DERIVATION, "cyan"),
+        ("WIF / Raw Key Import", "Convert a WIF or hex private key to BTC (legacy, segwit) and ETH addresses.", PAGE_KEY_IMPORT, "green"),
+        ("xpub / xprv Key Tool", "Derive watch-only addresses from an extended key or find a target address.", PAGE_XPUB, "cyan"),
+        ("SLIP39 Share Recovery", "Combine Shamir shares (Trezor) to recover the master secret and derive addresses.", PAGE_SLIP39, "purple"),
+        ("BIP38 Paper Wallet", "Decrypt a '6P…' encrypted key or run a dictionary attack against it.", PAGE_BIP38, "orange"),
+        ("Electrum Wallet", "Recover Electrum v1/v2 addresses or attack a forgotten v2 passphrase.", PAGE_ELECTRUM, "cyan"),
+        ("Brain Wallet", "SHA256/keccak256 passphrase→key derivation + dictionary attack.", PAGE_BRAIN_WALLET, "red"),
     ]
     for i, (title, desc, page, variant) in enumerate(items):
         with grid[i % 2]:
@@ -1703,57 +1779,153 @@ def page_bip39_validation():
 
 
 def page_incomplete_seed():
-    render_section_header("\U0001F50E", "INCOMPLETE SEED RECOVERY", f"BRUTE FORCE ≤ {MAX_MISSING_WORDS} UNKNOWNS")
+    render_section_header(
+        "\U0001F50E",
+        "INCOMPLETE SEED RECOVERY",
+        "MISSING WORDS · PARTIAL WORDS · BRUTE FORCE ENGINE",
+    )
     col1, col2 = st.columns([3, 2])
     with col1:
         open_box("SEED PHRASE RECONSTRUCTION", live=True)
+
+        with st.expander("PATTERN GUIDE — how to mark unknown / partial words"):
+            st.markdown(
+                """
+**Fully unknown word** — use `?`:
+```
+abandon ? ? abandon abandon abandon abandon abandon abandon abandon abandon about
+```
+Up to **2** unknown `?` positions are supported (2 048 candidates each ≈ 4.2 M total).
+
+---
+
+**Partial word (prefix known)** — append `*` after the letters you can read:
+```
+abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abou*
+```
+`abou*` → only BIP39 words starting with "abou" (e.g. **about**). Drastically shrinks the search space.
+
+**Partial word (suffix known)** — prepend `*` before the letters:
+```
+abandon ? *don abandon abandon abandon abandon abandon abandon abandon abandon about
+```
+
+**Partial word (prefix + suffix)** — wrap the unknown middle with `*`:
+```
+ab*on ? abandon ...
+```
+
+You may mix `?` and partial patterns freely. The total search space (product of all per-position candidate counts) must stay under **{:,}**.
+""".format(_SEARCH_SPACE_CAP)
+            )
+
         phrase = st.text_area(
-            "KNOWN WORDS - use '?' for each unknown position",
+            "KNOWN WORDS — use '?' for unknown, 'prefix*' or '*suffix' for partial words",
             value="",
             key="inc_phrase",
             height=100,
         )
-        target = st.text_input("TARGET ADDRESS (optional - filter candidates)", key="inc_target")
-        unknowns_in_input = phrase.count("?")
 
-        render_status_cards([
-            ("UNKNOWN WORDS", str(unknowns_in_input), "orange" if unknowns_in_input else ""),
-            ("ENGINE", "OFFLINE (MULTIPROCESSING)", "green"),
-            ("MAX UNKNOWNS", str(MAX_MISSING_WORDS), ""),
-            ("CHECKED", str(st.session_state.get("inc_last_checked", 0)), "" ),
-        ])
+        # ── live pattern analysis ──────────────────────────────────────────
+        from wallet_utils import _english_wordlist, _normalize_mnemonic
+        pattern_info: list[dict] = []
+        search_space_estimate = 1
+        has_any_variable = False
+
+        if phrase.strip():
+            try:
+                wl_sorted = sorted(_english_wordlist())
+                raw_words = _normalize_mnemonic(phrase).split()
+                for idx, tok in enumerate(raw_words):
+                    is_var = tok == _REC_UNKNOWN_TOKEN or _WILDCARD in tok
+                    if is_var:
+                        has_any_variable = True
+                        cands = _expand_pattern(tok, wl_sorted)
+                        n = len(cands)
+                        search_space_estimate *= max(n, 1)
+                        examples = ", ".join(cands[:4]) + ("…" if len(cands) > 4 else "")
+                        pattern_info.append({
+                            "pos": idx + 1,
+                            "token": tok,
+                            "matches": n,
+                            "examples": examples if n else "NO MATCH",
+                        })
+            except Exception:
+                pass
+
+        if pattern_info:
+            st.markdown("##### Pattern Analysis")
+            headers = ["POS", "PATTERN", "MATCHING WORDS", "EXAMPLES"]
+            rows = [
+                [
+                    str(p["pos"]),
+                    p["token"],
+                    str(p["matches"]) if p["matches"] else '<span class="cx-tag red">0 — NO MATCH</span>',
+                    p["examples"],
+                ]
+                for p in pattern_info
+            ]
+            render_data_table(headers, rows)
+            space_color = "green" if search_space_estimate <= _SEARCH_SPACE_CAP else "red"
+            render_status_cards([
+                ("VARIABLE POSITIONS", str(len(pattern_info)), "orange"),
+                ("SEARCH SPACE", f"{search_space_estimate:,}", space_color),
+                ("ENGINE", "OFFLINE (MULTIPROCESSING)", "green"),
+                ("LAST CHECKED", str(st.session_state.get("inc_last_checked", 0)), ""),
+            ])
+        else:
+            render_status_cards([
+                ("VARIABLE POSITIONS", "0" if phrase.strip() else "—", ""),
+                ("ENGINE", "OFFLINE (MULTIPROCESSING)", "green"),
+                ("MAX FULL UNKNOWNS (?)", str(MAX_MISSING_WORDS), ""),
+                ("LAST CHECKED", str(st.session_state.get("inc_last_checked", 0)), ""),
+            ])
+
+        st.divider()
+
+        # ── recovery mode (with / without address) ────────────────────────
+        mode = st.radio(
+            "RECOVERY MODE",
+            [
+                "With Known Wallet Address  (results filtered to your address)",
+                "Without Wallet Address  (all checksum-valid candidates returned)",
+            ],
+            key="inc_mode",
+            horizontal=False,
+        )
+        use_address = mode.startswith("With")
+
+        target = ""
+        if use_address:
+            target = st.text_input(
+                "TARGET WALLET ADDRESS",
+                key="inc_target",
+                placeholder="0x...  or  bc1...  or  1...  or  3...",
+            )
+            if not target.strip():
+                st.caption(
+                    "Enter the wallet address to confirm which candidate is correct. "
+                    "Without it the engine returns every checksum-valid phrase."
+                )
+        else:
+            st.caption(
+                "No address filter — every BIP39 checksum-valid candidate is returned. "
+                "Multiple results are normal; all are mathematically valid completions "
+                "of your phrase. Use another tool (e.g. Address Generator) to identify "
+                "the correct one."
+            )
 
         if _btn("RUN RECOVERY", key="inc_run", variant="orange"):
-            if not phrase.strip() or "?" not in phrase:
-                st.warning("Phrase must contain '?' to indicate missing words.")
-            elif unknowns_in_input > MAX_MISSING_WORDS:
-                st.error(f"Engine is hard-capped at {MAX_MISSING_WORDS} unknowns.")
-                log_event("err", f"Refused recovery: {unknowns_in_input} > {MAX_MISSING_WORDS}")
+            if not phrase.strip() or not has_any_variable:
+                st.warning("Phrase must contain at least one '?' or a partial pattern (e.g. 'aban*') to indicate unknown/partial words.")
             else:
                 target_arg = target.strip() or None
-                search_space = 2048 ** unknowns_in_input
-                
-                # Check for misspellings in known words
-                try:
-                    from wallet_utils import _english_wordlist, _normalize_mnemonic
-                    words = _normalize_mnemonic(phrase).split()
-                    wordlist = _english_wordlist()
-                    known = [w for w in words if w != "?"]
-                    invalid_words = [w for w in known if w not in wordlist]
-                    if invalid_words:
-                        st.error(f"Non-'?' tokens contain words not in the BIP39 English wordlist: {', '.join(invalid_words)}. Run Typo Correction Lab first.")
-                        log_event("err", f"Refused recovery due to invalid words: {', '.join(invalid_words)}")
-                        return
-                except Exception as e:
-                    pass
 
-                # Display estimated runtime
-                est_time = estimate_recovery_time(search_space, target_arg is not None, len(phrase.split()))
-                st.info(f"Calculated Search Space: {search_space:,} combinations. Estimated Runtime: {est_time:.2f} seconds.")
-                
+                log_event("info", f"Starting recovery — {len(pattern_info)} variable position(s) — address filter: {target_arg is not None}")
+
                 progress_bar = st.progress(0.0)
                 status_text = st.empty()
-                
+
                 def update_progress(checked, total, found):
                     pct = min(1.0, float(checked) / total)
                     progress_bar.progress(pct)
@@ -1762,8 +1934,6 @@ def page_incomplete_seed():
                         f"**Candidates Found**: {found}"
                     )
 
-                log_event("info", f"Starting multiprocessing recovery for {unknowns_in_input} unknown(s)...")
-                
                 with st.spinner("Executing candidate search..."):
                     try:
                         result = recover_missing_words(
@@ -1775,38 +1945,1164 @@ def page_incomplete_seed():
                     except ValueError as e:
                         log_event("err", f"Recovery error: {e}")
                         st.error(str(e))
-                        return
-                        
+                        st.stop()
+
                 st.session_state["inc_last_checked"] = result["checked"]
                 cand = result["candidates"]
-                
-                # Transparency Statistics
+
                 st.markdown("### Recovery Metrics")
                 render_status_cards([
+                    ("SEARCH SPACE", f"{result.get('search_space', 0):,}", ""),
                     ("TOTAL CHECKED", f"{result['checked']:,}", ""),
                     ("CHECKSUM PASSED", f"{result['checksum_passed']:,}", "green"),
-                    ("CHECKSUM FILTERED", f"{result['checked'] - result['checksum_passed']:,}", "orange"),
                     ("SPEED", f"{int(result['checked'] / (result['elapsed_time'] or 0.001)):,} keys/s", ""),
                 ])
-                
+
                 if cand:
                     log_event("ok", f"Recovered {len(cand)} candidate(s) in {result['elapsed_time']:.2f}s")
-                    st.success(f"Found {len(cand)} candidate phrase(s) in {result['elapsed_time']:.2f} seconds.")
+                    mode_label = "address-verified" if target_arg else "checksum-valid"
+                    st.success(f"Found {len(cand)} {mode_label} candidate phrase(s) in {result['elapsed_time']:.2f} seconds.")
                     st.session_state["recovery_candidates"] = cand
                     for c in cand[:10]:
                         st.code(c, language="text")
                     if result["truncated"]:
                         st.warning("Result list truncated at 100 candidates.")
+                    if not target_arg and len(cand) > 1:
+                        st.info(
+                            f"{len(cand)} candidates returned (no address filter). "
+                            "Use the Address Generator or Address Matcher to identify the correct phrase."
+                        )
                 else:
                     log_event("warn", "No candidates produced")
-                    st.error("No checksum-valid candidates produced.")
+                    if target_arg:
+                        st.error("No candidates matched the target address. Verify the address and try without the address filter to see all checksum-valid options.")
+                    else:
+                        st.error("No checksum-valid candidates produced. Check that your known words are spelled correctly (run Typo Correction Lab).")
         close_box()
     with col2:
         render_terminal("recovery :: missing-words")
 
 
+def page_passphrase_attack():
+    render_section_header("\U0001F4A5", "PASSPHRASE RECOVERY ATTACK", "WORDLIST · MUTATIONS · MULTIPROCESSING")
+
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        open_box("MNEMONIC & TARGET ADDRESS", live=True)
+        mnemonic_input = st.text_area(
+            "MNEMONIC PHRASE (BIP39-valid)",
+            key="ppa_mnemonic",
+            height=80,
+            placeholder="abandon abandon abandon … (12 or 24 words)",
+        )
+        target_input = st.text_input(
+            "TARGET WALLET ADDRESS (required — used to confirm correct passphrase)",
+            key="ppa_target",
+            placeholder="0x…  or  bc1…  or  r…  etc.",
+        )
+        close_box()
+
+        open_box("WORDLIST INPUT", live=True)
+        st.caption(
+            "One word or phrase per line. Commas accepted. "
+            "Common sources: dates, pet names, favourite words, partial passwords."
+        )
+        wl_tab1, wl_tab2 = st.tabs(["PASTE WORDLIST", "UPLOAD FILE"])
+        with wl_tab1:
+            wordlist_text = st.text_area(
+                "PASTE WORDS / PHRASES",
+                key="ppa_wordlist_text",
+                height=130,
+                placeholder="password\nsecret\nmywallet\n2022\n...",
+            )
+        with wl_tab2:
+            uploaded_wl = st.file_uploader(
+                "Upload .txt wordlist (one entry per line)",
+                type=["txt"],
+                key="ppa_wordlist_file",
+            )
+            if uploaded_wl is not None:
+                wordlist_text = uploaded_wl.read().decode("utf-8", errors="replace")
+                st.success(f"Loaded {len([l for l in wordlist_text.splitlines() if l.strip()]):,} lines from {uploaded_wl.name}")
+        close_box()
+
+        open_box("MUTATION RULES", live=True)
+        st.caption("Mutations are applied to every base word. Combined rules multiply the candidate count.")
+        rule_cols = st.columns(2)
+        selected_rules: set[str] = set()
+        rule_items = list(MUTATION_RULES.items())
+        for i, (rule_key, rule_label) in enumerate(rule_items):
+            col = rule_cols[i % 2]
+            with col:
+                default = rule_key in ("capitalize", "append_numbers", "append_years", "append_symbols")
+                if st.checkbox(rule_label, value=default, key=f"ppa_rule_{rule_key}"):
+                    selected_rules.add(rule_key)
+
+        # Live candidate count preview
+        active_wordlist = wordlist_text if "wordlist_text" in dir() else st.session_state.get("ppa_wordlist_text", "")
+        if active_wordlist.strip():
+            est = estimate_candidate_count(active_wordlist, selected_rules)
+            space_color = "orange" if est > CANDIDATE_WARN_THRESHOLD else "green"
+            render_status_cards([
+                ("BASE WORDS", str(len([l for l in active_wordlist.splitlines() if l.strip()])), ""),
+                ("ESTIMATED CANDIDATES", f"{est:,}", space_color),
+                ("CORES AVAILABLE", str(max(1, __import__("multiprocessing").cpu_count() - 1)), "green"),
+                ("EST. SPEED", "~5,000 / sec", ""),
+            ], columns=4)
+            if est > CANDIDATE_WARN_THRESHOLD:
+                est_secs = est / 5000
+                m, s = divmod(int(est_secs), 60)
+                h, m = divmod(m, 60)
+                t_str = f"{h}h {m}m {s}s" if h else f"{m}m {s}s"
+                st.warning(f"Large candidate list (~{est:,}). Estimated runtime: {t_str}. Consider fewer mutation rules.")
+        close_box()
+
+        if _btn("RUN PASSPHRASE ATTACK", key="ppa_run", variant="red", use_container_width=True):
+            active_wl = st.session_state.get("ppa_wordlist_text", "")
+            mn = st.session_state.get("ppa_mnemonic", "").strip()
+            tgt = st.session_state.get("ppa_target", "").strip()
+
+            if not mn:
+                st.error("Mnemonic is required.")
+                st.stop()
+            if not tgt:
+                st.error("Target wallet address is required.")
+                st.stop()
+            if not active_wl.strip():
+                st.error("Wordlist is empty. Paste words or upload a file.")
+                st.stop()
+
+            try:
+                candidates = build_candidate_list(active_wl, selected_rules)
+            except Exception as e:
+                st.error(f"Failed to build candidate list: {e}")
+                st.stop()
+
+            if not candidates:
+                st.warning("No candidates generated. Check your wordlist input.")
+                st.stop()
+
+            log_event("info", f"Passphrase attack: {len(candidates):,} candidates, target {tgt[:12]}...")
+
+            progress_bar = st.progress(0.0)
+            status_text = st.empty()
+
+            def _pp_cb(checked, total, found):
+                pct = min(1.0, checked / total)
+                progress_bar.progress(pct)
+                status_text.markdown(
+                    f"**Checked**: {checked:,} / {total:,} ({pct*100:.1f}%) | **Matches**: {found}"
+                )
+
+            with st.spinner("Running passphrase attack…"):
+                try:
+                    result = recover_passphrase(
+                        mn,
+                        candidates,
+                        tgt,
+                        progress_callback=_pp_cb,
+                    )
+                except ValueError as e:
+                    log_event("err", f"Passphrase attack error: {e}")
+                    st.error(str(e))
+                    st.stop()
+
+            st.markdown("### Attack Results")
+            render_status_cards([
+                ("CANDIDATES TESTED", f"{result['checked']:,}", ""),
+                ("TOTAL CANDIDATES", f"{result['total']:,}", ""),
+                ("ELAPSED", f"{result['elapsed_time']:.1f}s", ""),
+                ("SPEED", f"{int(result['checked'] / (result['elapsed_time'] or 0.001)):,}/s", "green"),
+            ])
+
+            if result["matches"]:
+                log_event("ok", f"Passphrase found! ({len(result['matches'])} match(es))")
+                st.balloons()
+                st.success(f"Found {len(result['matches'])} matching passphrase(s)!")
+                for m in result["matches"]:
+                    st.code(m, language="text")
+                if result["truncated"]:
+                    st.info("Search stopped after first match. Run again without address filter to find all.")
+            else:
+                log_event("warn", "Passphrase attack: no matches found")
+                st.error(
+                    "No passphrase matched the target address. "
+                    "Try: more mutation rules, a larger wordlist, or verify the address is correct."
+                )
+
+    with col2:
+        render_terminal("recovery :: passphrase-attack")
+        open_box("HOW IT WORKS")
+        st.markdown(
+            """
+**1. Build candidate list**
+Your words × mutation rules (capitalize, append numbers/years/symbols, leet, etc.)
+
+**2. Multiprocessing attack**
+Each candidate is tested: BIP39 seed generation (PBKDF2) → address derivation → compare to target.
+
+**3. Match confirmed**
+A match means that passphrase + your mnemonic derives the target address — mathematically confirmed.
+
+**Typical speeds**: ~5,000 candidates/sec on 8 cores.
+
+**100 words + 4 rules** ≈ 1,000 candidates → < 1 second.
+
+**10,000 words + 5 rules** ≈ 150,000 candidates → ~30 seconds.
+            """
+        )
+        close_box()
+
+
+# ---------------------------------------------------------------------------
+# WIF / Raw Private Key Importer
+# ---------------------------------------------------------------------------
+
+def page_key_import():
+    render_section_header("\U0001F511", "KEY IMPORTER", "WIF · RAW HEX · MULTI-FORMAT ADDRESSES")
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        open_box("IMPORT PRIVATE KEY", live=True)
+        key_fmt = st.radio(
+            "KEY FORMAT",
+            ["WIF (Wallet Import Format)", "Raw hex (64 hex characters)"],
+            key="ki_fmt",
+            horizontal=True,
+        )
+        key_input = st.text_input(
+            "PRIVATE KEY",
+            key="ki_key",
+            type="password",
+            placeholder="5… / K… / L… (WIF)   or   64 hex characters",
+        )
+
+        if _btn("DERIVE ADDRESSES", key="ki_run", variant="cyan"):
+            raw = key_input.strip()
+            if not raw:
+                st.warning("Enter a private key.")
+                st.stop()
+
+            from bip_utils import (
+                WifDecoder, Secp256k1PrivateKey,
+                P2PKHAddr, P2WPKHAddr,
+                Bip38PubKeyModes,
+            )
+            from Crypto.Hash import keccak as _keccak
+
+            try:
+                if "WIF" in key_fmt:
+                    priv_bytes, pub_mode = WifDecoder.Decode(raw)
+                    compressed = (pub_mode != Bip38PubKeyModes.UNCOMPRESSED)
+                else:
+                    hex_clean = raw.replace(" ", "").replace("0x", "")
+                    if len(hex_clean) != 64:
+                        st.error("Raw hex key must be exactly 64 hex characters (32 bytes).")
+                        st.stop()
+                    priv_bytes = bytes.fromhex(hex_clean)
+                    compressed = True
+                    pub_mode = None
+
+                priv = Secp256k1PrivateKey.FromBytes(priv_bytes)
+                pub = priv.PublicKey()
+
+                # BTC legacy P2PKH
+                from bip_utils import P2PKHPubKeyModes
+                pk_mode = P2PKHPubKeyModes.COMPRESSED if compressed else P2PKHPubKeyModes.UNCOMPRESSED
+                btc_legacy = P2PKHAddr.EncodeKey(pub, net_ver=b"\x00", pub_key_mode=pk_mode)
+                btc_segwit = P2WPKHAddr.EncodeKey(pub, hrp="bc", wit_ver=0)
+
+                # ETH / EVM
+                raw_pub_uncompressed = pub.RawUncompressed().ToBytes()[1:]
+                k = _keccak.new(digest_bits=256)
+                k.update(raw_pub_uncompressed)
+                eth_addr = "0x" + k.digest()[-20:].hex()
+
+                log_event("ok", f"Key imported → ETH {eth_addr[:12]}…")
+                st.success("Key imported successfully.")
+                render_rblock([
+                    ("BTC LEGACY (P2PKH)", btc_legacy, "rv"),
+                    ("BTC NATIVE SEGWIT (bech32)", btc_segwit, "rv"),
+                    ("ETH / BSC / POLYGON / EVM", eth_addr, "rv"),
+                    ("KEY TYPE", "Compressed" if compressed else "Uncompressed", "ra"),
+                ])
+                st.info(
+                    "These addresses are derived from the imported key's public key only. "
+                    "No private key data is stored, logged, or exported."
+                )
+
+            except ValueError as e:
+                st.error(f"Failed to decode key: {e}")
+                log_event("err", f"Key import error: {e}")
+        close_box()
+
+        open_box("VERIFY AGAINST KNOWN ADDRESS")
+        st.caption(
+            "Paste a known address here to verify the imported key matches it. "
+            "Useful when you have a key fragment and need to confirm it belongs to a specific wallet."
+        )
+        known_addr = st.text_input("KNOWN ADDRESS", key="ki_verify", placeholder="1…  3…  bc1…  0x…")
+        if known_addr.strip() and st.session_state.get("ki_key", "").strip():
+            raw2 = st.session_state.get("ki_key", "").strip()
+            from bip_utils import WifDecoder, Secp256k1PrivateKey, P2PKHAddr, P2WPKHAddr, Bip38PubKeyModes, P2PKHPubKeyModes
+            from Crypto.Hash import keccak as _keccak2
+            try:
+                fmt2 = st.session_state.get("ki_fmt", "WIF")
+                if "WIF" in fmt2:
+                    pb, pm = WifDecoder.Decode(raw2)
+                    compr = (pm != Bip38PubKeyModes.UNCOMPRESSED)
+                else:
+                    pb = bytes.fromhex(raw2.replace("0x","").replace(" ",""))
+                    compr = True
+                pk2 = Secp256k1PrivateKey.FromBytes(pb)
+                pu2 = pk2.PublicKey()
+                pk_mode2 = P2PKHPubKeyModes.COMPRESSED if compr else P2PKHPubKeyModes.UNCOMPRESSED
+                derived = [
+                    P2PKHAddr.EncodeKey(pu2, net_ver=b"\x00", pub_key_mode=pk_mode2),
+                    P2WPKHAddr.EncodeKey(pu2, hrp="bc", wit_ver=0),
+                ]
+                rpu = pu2.RawUncompressed().ToBytes()[1:]
+                k2 = _keccak2.new(digest_bits=256)
+                k2.update(rpu)
+                derived.append("0x" + k2.digest()[-20:].hex())
+
+                target = known_addr.strip().lower()
+                if any(d.lower() == target for d in derived):
+                    log_event("ok", f"Key verification: match confirmed for {known_addr[:12]}…")
+                    st.success("Match confirmed — the imported key produces this address.")
+                else:
+                    st.error("No match — this key does NOT produce the known address.")
+            except Exception as e:
+                st.caption(f"Cannot verify: {e}")
+        close_box()
+
+    with col2:
+        render_terminal("recovery :: key-import")
+        open_box("KEY FORMAT GUIDE")
+        st.markdown(
+            """
+**WIF — Wallet Import Format**
+Base58Check-encoded private key. Three variants:
+- `5…` — Uncompressed, BTC mainnet (51 chars)
+- `K…` or `L…` — Compressed, BTC mainnet (52 chars)
+
+Most paper wallets and old hardware wallet backups use WIF.
+
+**Raw hex**
+64 hexadecimal characters = 32 bytes = the raw private key integer.
+
+Example: `0000…0001` = key #1 (used in test vectors).
+
+**Address derivation**
+One private key produces multiple addresses:
+- BTC legacy: compress pubkey → SHA256 → RIPEMD160 → Base58Check
+- BTC segwit: compress pubkey → SHA256 → RIPEMD160 → bech32
+- ETH: uncompress pubkey → keccak256 → last 20 bytes → hex
+            """
+        )
+        close_box()
+
+
+# ---------------------------------------------------------------------------
+# xpub / xprv Key Tool
+# ---------------------------------------------------------------------------
+
+def page_xpub_tool():
+    render_section_header("\U0001F4CE", "XPUB / XPRV KEY TOOL", "WATCH-ONLY · CHILD ADDRESS DERIVATION")
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        open_box("EXTENDED KEY INPUT", live=True)
+        xkey_input = st.text_input(
+            "EXTENDED KEY (xpub / xprv / ypub / yprv / zpub / zprv)",
+            key="xpub_key",
+            placeholder="xpub6… or zpub… or xprv…",
+        )
+        coin_sel = st.radio("COIN", ["BTC", "ETH"], key="xpub_coin", horizontal=True)
+        st.caption(
+            "ETH and BTC share the xpub/xprv prefix. Select the correct coin to disambiguate. "
+            "ypub/zpub are BTC-only."
+        )
+
+        # Live key type detection
+        raw_key = xkey_input.strip()
+        if raw_key:
+            try:
+                info = extended_key_info(raw_key, coin=coin_sel)
+                render_status_cards([
+                    ("PREFIX", info["prefix"], "green"),
+                    ("TYPE", info["type"], ""),
+                    ("DEPTH", str(info["depth"]), ""),
+                    ("KEY MODE", "PUBLIC ONLY" if info["is_public"] else "PRIVATE", "orange" if not info["is_public"] else "green"),
+                ])
+            except Exception as e:
+                st.warning(f"Key parse error: {e}")
+
+        xkey_count = st.number_input("ADDRESSES TO DERIVE", 1, 100, value=10, key="xpub_count")
+        xkey_change = st.radio("ADDRESS TYPE", ["Receiving (change=0)", "Change (change=1)"], key="xpub_change", horizontal=True)
+        xkey_start = st.number_input("START INDEX", 0, 10000, value=0, key="xpub_start")
+
+        show_wif = False
+        if raw_key and raw_key[:4].lower() in ("xprv", "yprv", "zprv"):
+            show_wif = st.checkbox(
+                "Include WIF private keys in results (xprv only)",
+                value=False, key="xpub_wif",
+            )
+            if show_wif:
+                st.warning("WIF keys expose the private key for each address. Do not share or export this output.")
+
+        if _btn("DERIVE ADDRESSES", key="xpub_run", variant="cyan"):
+            k = st.session_state.get("xpub_key", "").strip()
+            if not k:
+                st.warning("Enter an extended key.")
+                st.stop()
+            change = 1 if "change=1" in st.session_state.get("xpub_change", "") else 0
+            try:
+                results = derive_from_extended_key(
+                    k,
+                    coin=coin_sel,
+                    count=int(xkey_count),
+                    change=change,
+                    start_index=int(xkey_start),
+                    include_wif=show_wif,
+                )
+            except ValueError as e:
+                st.error(str(e))
+                log_event("err", f"xpub derive error: {e}")
+                st.stop()
+
+            log_event("ok", f"xpub derived {len(results)} {coin_sel} addresses (change={change})")
+            if show_wif:
+                headers = ["INDEX", "ADDRESS", "WIF"]
+                rows = [[str(r["index"]), r["address"], r.get("wif", "")] for r in results]
+            else:
+                headers = ["INDEX", "TYPE", "ADDRESS"]
+                rows = [[str(r["index"]), r["type"], r["address"]] for r in results]
+            render_data_table(headers, rows)
+
+            # Store in session for export (strip WIF before saving)
+            safe_results = [{"coin": coin_sel, "address_type": r["type"], "path": r["path_desc"], "address": r["address"]} for r in results]
+            st.session_state["last_derivations"] = safe_results
+        close_box()
+
+        open_box("ADDRESS FINDER", live=True)
+        xpub_target = st.text_input("TARGET ADDRESS", key="xpub_target", placeholder="0x…  or  bc1…  or  1…")
+        xpub_scan_depth = st.number_input("SCAN DEPTH (each direction)", 1, 500, value=50, key="xpub_depth")
+        if _btn("FIND ADDRESS", key="xpub_find", variant="green"):
+            k = st.session_state.get("xpub_key", "").strip()
+            t = st.session_state.get("xpub_target", "").strip()
+            if not k or not t:
+                st.warning("Extended key and target address are required.")
+                st.stop()
+            try:
+                result = find_address_in_extended_key(k, t, coin=coin_sel, count=int(xpub_scan_depth))
+            except ValueError as e:
+                st.error(str(e))
+                st.stop()
+            if result["match"]:
+                m = result["match"]
+                log_event("ok", f"xpub address found at {m['path_desc']}")
+                st.success("Address found!")
+                render_rblock([
+                    ("TYPE", m["type"], "ra"),
+                    ("CHANGE", str(m["change"]), "rk"),
+                    ("INDEX", str(m["index"]), "rk"),
+                    ("PATH", m["path_desc"], "rv"),
+                    ("ADDRESS", m["address"], "rv"),
+                    ("SEARCHED", f"{result['searched']:,}", "rk"),
+                ])
+            else:
+                log_event("warn", f"xpub finder: no match in {result['searched']} addresses")
+                st.error(f"Not found in {result['searched']:,} derived addresses. Try a larger scan depth.")
+        close_box()
+
+    with col2:
+        render_terminal("recovery :: xpub")
+        open_box("EXTENDED KEY FORMATS")
+        st.markdown(
+            """
+**xpub / xprv** — BIP44 P2PKH (legacy Bitcoin or Ethereum)
+
+**ypub / yprv** — BIP49 P2SH-P2WPKH (wrapped segwit, `3…` addresses)
+
+**zpub / zprv** — BIP84 P2WPKH (native segwit, `bc1q…` addresses)
+
+**Use cases**:
+- Watch-only wallet: export xpub from hardware wallet → derive all receiving addresses without the seed
+- Recover address index: find which index produced a known address
+- Verify ownership: confirm a key controls an address
+
+**Watch-only mode (xpub)**: Only public key operations — no private key exposure.
+
+**xprv mode**: Full key derivation including WIF export. Handle with the same care as a seed phrase.
+            """
+        )
+        close_box()
+
+
+# ---------------------------------------------------------------------------
+# SLIP39 Share Recovery
+# ---------------------------------------------------------------------------
+
+def page_slip39():
+    render_section_header("\U0001F9E9", "SLIP39 SHARE RECOVERY", "SHAMIR SECRET SHARING · TREZOR")
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        open_box("SHARE INPUT & VALIDATION", live=True)
+        st.caption(
+            "Enter each SLIP39 share mnemonic on a separate line. "
+            "You need at least the threshold number of shares for each group."
+        )
+        shares_text = st.text_area(
+            "SLIP39 SHARES (one per line)",
+            key="s39_shares",
+            height=200,
+            placeholder="duck oil tank stove hero fuss dish fold firm hawk risk moon...\nabandon ...\n...",
+        )
+        s39_passphrase = st.text_input(
+            "SLIP39 PASSPHRASE (optional — set when shares were created)",
+            key="s39_pass",
+            type="password",
+            placeholder="Leave blank if no passphrase was used",
+        )
+
+        # Live share validation
+        raw_shares = [s.strip() for s in shares_text.splitlines() if s.strip()]
+        if raw_shares:
+            valid_count = 0
+            for i, share in enumerate(raw_shares):
+                vr = validate_share(share)
+                status = "OK" if vr["valid"] else f"ERROR: {vr['error']}"
+                color = "green" if vr["valid"] else "red"
+                st.markdown(
+                    f'<span style="color:var(--{"cx-green" if vr["valid"] else "cx-red"},{color})">Share {i+1} ({vr["word_count"]} words): {status}</span>',
+                    unsafe_allow_html=True,
+                )
+                if vr["valid"]:
+                    valid_count += 1
+            st.caption(f"{valid_count}/{len(raw_shares)} shares validated.")
+        close_box()
+
+        open_box("COMBINE SHARES & DERIVE ADDRESSES", live=True)
+        if _btn("COMBINE & DERIVE", key="s39_combine", variant="cyan"):
+            shares = [s.strip() for s in st.session_state.get("s39_shares", "").splitlines() if s.strip()]
+            if len(shares) < 2:
+                st.warning("Enter at least 2 shares.")
+                st.stop()
+            pas = st.session_state.get("s39_pass", "")
+            with st.spinner("Combining shares and deriving addresses…"):
+                result = combine_shares(shares, passphrase=pas)
+            if result["error"]:
+                log_event("err", f"SLIP39 combine error: {result['error']}")
+                st.error(f"Recovery failed: {result['error']}")
+                st.stop()
+            log_event("ok", f"SLIP39 combined: {len(result['addresses'])} addresses derived")
+            st.success("Shares combined successfully!")
+            render_status_cards([
+                ("SHARES USED", str(len(shares)), "green"),
+                ("ADDRESSES DERIVED", str(len(result["addresses"])), "green"),
+                ("PASSPHRASE USED", "YES" if pas else "NO", "orange" if pas else ""),
+            ])
+            rows = [[a["coin"], a["label"], str(a["index"]), a["address"]] for a in result["addresses"]]
+            render_data_table(["COIN", "TYPE", "INDEX", "ADDRESS"], rows)
+
+            safe = [{"coin": a["coin"], "address_type": a["label"], "path": f"index={a['index']}", "address": a["address"]} for a in result["addresses"]]
+            st.session_state["last_derivations"] = safe
+        close_box()
+
+        open_box("ADDRESS FINDER", live=True)
+        s39_target = st.text_input("TARGET ADDRESS", key="s39_target", placeholder="0x…  bc1…  1…")
+        if _btn("FIND ADDRESS IN SHARES", key="s39_find", variant="green"):
+            shares = [s.strip() for s in st.session_state.get("s39_shares", "").splitlines() if s.strip()]
+            tgt = st.session_state.get("s39_target", "").strip()
+            if not shares or not tgt:
+                st.warning("Shares and target address are required.")
+                st.stop()
+            pas = st.session_state.get("s39_pass", "")
+            result = find_address_in_shares(shares, tgt, passphrase=pas)
+            if result["error"]:
+                st.error(f"Error: {result['error']}")
+                st.stop()
+            if result["match"]:
+                m = result["match"]
+                log_event("ok", f"SLIP39 address found: {m['coin']} index={m['index']}")
+                st.success("Address found!")
+                render_rblock([
+                    ("COIN", m["coin"], "ra"),
+                    ("TYPE", m["label"], "ra"),
+                    ("INDEX", str(m["index"]), "rk"),
+                    ("ADDRESS", m["address"], "rv"),
+                    ("SEARCHED", f"{result['searched']:,}", "rk"),
+                ])
+            else:
+                st.error(f"Address not found in {result['searched']:,} derived addresses.")
+        close_box()
+
+        open_box("PASSPHRASE DICTIONARY ATTACK (SLIP39)", live=True)
+        st.caption("If you know the shares but forgot the optional SLIP39 passphrase, run a dictionary attack.")
+        s39_wl_tab1, s39_wl_tab2 = st.tabs(["PASTE WORDLIST", "UPLOAD FILE"])
+        with s39_wl_tab1:
+            s39_wordlist = st.text_area("WORDS / PHRASES", key="s39_wordlist", height=100,
+                                        placeholder="password\nsecret\n2021\n...")
+        with s39_wl_tab2:
+            s39_uploaded = st.file_uploader("Upload .txt wordlist", type=["txt"], key="s39_wl_file")
+            if s39_uploaded:
+                s39_wordlist = s39_uploaded.read().decode("utf-8", errors="replace")
+                st.success(f"Loaded {len([l for l in s39_wordlist.splitlines() if l.strip()]):,} lines")
+        s39_atk_target = st.text_input("TARGET ADDRESS (required)", key="s39_atk_target",
+                                        placeholder="0x…  or  bc1…")
+        if _btn("ATTACK SLIP39 PASSPHRASE", key="s39_attack", variant="red", use_container_width=True):
+            shares = [s.strip() for s in st.session_state.get("s39_shares", "").splitlines() if s.strip()]
+            wl = st.session_state.get("s39_wordlist", "")
+            tgt = st.session_state.get("s39_atk_target", "").strip()
+            if not shares:
+                st.error("Enter shares above.")
+                st.stop()
+            if not tgt:
+                st.error("Target address is required.")
+                st.stop()
+            if not wl.strip():
+                st.error("Wordlist is empty.")
+                st.stop()
+            from passphrase_utils import build_candidate_list
+            candidates = build_candidate_list(wl, set())
+            log_event("info", f"SLIP39 passphrase attack: {len(candidates):,} candidates")
+            s39_prog = st.progress(0.0)
+            s39_status = st.empty()
+
+            def _s39_cb(checked, total, found):
+                pct = min(1.0, checked / total)
+                s39_prog.progress(pct)
+                s39_status.markdown(f"**Checked**: {checked:,} / {total:,} | **Matches**: {found}")
+
+            with st.spinner("Attacking SLIP39 passphrase…"):
+                try:
+                    result = recover_slip39_passphrase(shares, candidates, tgt, progress_callback=_s39_cb)
+                except ValueError as e:
+                    st.error(str(e))
+                    st.stop()
+
+            render_status_cards([
+                ("TESTED", f"{result['checked']:,}", ""),
+                ("ELAPSED", f"{result['elapsed_time']:.1f}s", ""),
+                ("SPEED", f"{int(result['checked'] / (result['elapsed_time'] or 0.001)):,}/s", "green"),
+            ])
+            if result["matches"]:
+                st.balloons()
+                log_event("ok", f"SLIP39 passphrase found: {len(result['matches'])} match(es)")
+                st.success(f"Found {len(result['matches'])} matching passphrase(s)!")
+                for m in result["matches"]:
+                    st.code(f"SLIP39 Passphrase: {m}", language="text")
+            else:
+                log_event("warn", "SLIP39 passphrase attack: no matches")
+                st.error("No passphrase matched. Try a larger wordlist.")
+        close_box()
+
+    with col2:
+        render_terminal("recovery :: slip39")
+        open_box("ABOUT SLIP39")
+        st.markdown(
+            """
+**SLIP39** is Trezor's advanced seed backup standard using Shamir's Secret Sharing.
+
+Instead of one 24-word BIP39 phrase, the seed is split into **N shares**, of which **M** must be combined (M-of-N scheme).
+
+**Example schemes:**
+- 2-of-3: any 2 of 3 shares → recover seed
+- 3-of-5: any 3 of 5 shares → recover seed
+- Multi-group: (2-of-3 from Group A) AND (1-of-1 from Group B)
+
+**SLIP39 wordlist**: 1,024 words (different from BIP39's 2,048).
+
+Each share is 20-33 words. The first word encodes the share's group membership.
+
+**Optional passphrase**: Applied during master secret decryption. Different passphrases produce different wallets from the same shares — analogous to BIP39 passphrase.
+
+**Supported devices**: Trezor Model T, Trezor Safe, and compatible wallets.
+            """
+        )
+        close_box()
+
+
+# ---------------------------------------------------------------------------
+# BIP38 Encrypted Key Tool
+# ---------------------------------------------------------------------------
+
+def page_bip38():
+    render_section_header("\U0001F5DD", "BIP38 ENCRYPTED KEY TOOL", "PAPER WALLET · SCRYPT DECRYPTION")
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        open_box("SINGLE KEY DECRYPT", live=True)
+        encrypted_key_input = st.text_input(
+            "BIP38 ENCRYPTED KEY (starts with '6P')",
+            key="b38_key",
+            placeholder="6PRVWUbkzzsbcVac2qwfssoUJAN1Xhrg6bNk8J7Nzm5H7kxEbn2Nh2ZoGg",
+        )
+        passphrase_input = st.text_input(
+            "PASSPHRASE",
+            key="b38_pass",
+            type="password",
+            placeholder="Enter the passphrase to test",
+        )
+        if _btn("DECRYPT KEY", key="b38_decrypt", variant="cyan"):
+            enc = encrypted_key_input.strip()
+            pas = passphrase_input.strip()
+            if not enc:
+                st.warning("Enter a BIP38 key.")
+                st.stop()
+            if not pas:
+                st.warning("Enter a passphrase.")
+                st.stop()
+            result = decrypt_bip38(enc, pas)
+            if result["success"]:
+                log_event("ok", f"BIP38 decrypted → {result['address']}")
+                st.success("Decryption successful!")
+                render_rblock([
+                    ("ADDRESS", result["address"], "rv"),
+                    ("KEY MODE", result["pub_key_mode"], "ra"),
+                    ("STATUS", "PASSPHRASE CORRECT", "rv"),
+                ])
+                st.info(
+                    "The BTC address above is derived from the decrypted private key. "
+                    "Verify this matches your expected address before assuming the passphrase is correct."
+                )
+            else:
+                log_event("warn", f"BIP38 decrypt failed: {result['error']}")
+                st.error(f"Decryption failed: {result['error']}")
+        close_box()
+
+        open_box("DICTIONARY ATTACK", live=True)
+        st.caption(
+            "Test many passphrases against the BIP38 key. "
+            "Provide a known target address to filter results, or leave blank to report any successful decryption."
+        )
+        b38_wl_tab1, b38_wl_tab2 = st.tabs(["PASTE WORDLIST", "UPLOAD FILE"])
+        with b38_wl_tab1:
+            b38_wordlist = st.text_area(
+                "PASTE WORDS / PHRASES (one per line)",
+                key="b38_wordlist",
+                height=120,
+                placeholder="password\nsecret\npaperwallet\n2020\n...",
+            )
+        with b38_wl_tab2:
+            b38_uploaded = st.file_uploader("Upload .txt wordlist", type=["txt"], key="b38_wl_file")
+            if b38_uploaded:
+                b38_wordlist = b38_uploaded.read().decode("utf-8", errors="replace")
+                st.success(f"Loaded {len([l for l in b38_wordlist.splitlines() if l.strip()]):,} lines")
+
+        b38_target = st.text_input(
+            "TARGET BTC ADDRESS (optional — filter results)",
+            key="b38_target",
+            placeholder="1…  or  3…  (leave blank to report all successful decryptions)",
+        )
+
+        st.caption(
+            "BIP38 uses scrypt internally — each candidate takes ~0.1-0.5s. "
+            "Keep wordlists small (< 1,000 candidates) for reasonable runtimes."
+        )
+
+        if _btn("RUN DICTIONARY ATTACK", key="b38_attack_run", variant="red", use_container_width=True):
+            enc = st.session_state.get("b38_key", "").strip()
+            wl_text = st.session_state.get("b38_wordlist", "")
+            tgt = st.session_state.get("b38_target", "").strip()
+            if not enc:
+                st.error("Enter a BIP38 key above.")
+                st.stop()
+            if not wl_text.strip():
+                st.error("Wordlist is empty.")
+                st.stop()
+
+            from passphrase_utils import build_candidate_list
+            try:
+                candidates = build_candidate_list(wl_text, set())
+            except Exception as e:
+                st.error(f"Failed to parse wordlist: {e}")
+                st.stop()
+
+            log_event("info", f"BIP38 attack: {len(candidates):,} candidates")
+            b38_prog = st.progress(0.0)
+            b38_status = st.empty()
+
+            def _b38_cb(checked, total, found):
+                pct = min(1.0, checked / total)
+                b38_prog.progress(pct)
+                b38_status.markdown(
+                    f"**Checked**: {checked:,} / {total:,} ({pct*100:.1f}%) | **Matches**: {found}"
+                )
+
+            with st.spinner("Attacking BIP38 key…"):
+                try:
+                    result = attack_bip38(enc, candidates, target_address=tgt, progress_callback=_b38_cb)
+                except ValueError as e:
+                    st.error(str(e))
+                    st.stop()
+
+            render_status_cards([
+                ("TESTED", f"{result['checked']:,}", ""),
+                ("TOTAL", f"{result['total']:,}", ""),
+                ("ELAPSED", f"{result['elapsed_time']:.1f}s", ""),
+                ("SPEED", f"{int(result['checked'] / (result['elapsed_time'] or 0.001)):,}/s", ""),
+            ])
+
+            if result["matches"]:
+                st.balloons()
+                log_event("ok", f"BIP38 attack: {len(result['matches'])} match(es)")
+                st.success(f"Found {len(result['matches'])} match(es)!")
+                for m in result["matches"]:
+                    st.code(
+                        f"Passphrase : {m['passphrase']}\n"
+                        f"BTC Address: {m['address']}\n"
+                        f"Key Mode   : {m['pub_key_mode']}",
+                        language="text",
+                    )
+            else:
+                log_event("warn", "BIP38 attack: no matches")
+                st.error("No passphrase matched. Try a larger wordlist or check the BIP38 key.")
+        close_box()
+
+    with col2:
+        render_terminal("recovery :: bip38")
+        open_box("ABOUT BIP38")
+        st.markdown(
+            """
+BIP38 encrypts a Bitcoin private key with a passphrase using **scrypt** key derivation.
+
+The encrypted key starts with `6P` and is ~51 characters long.
+
+**Two modes:**
+- **No-EC mode** — standard paper wallet encryption. Most common.
+- **EC-multiply mode** — used by vanity address generators (also `6P…`).
+
+Both modes are automatically detected and tried.
+
+**Scrypt cost**: ~0.1-0.5 seconds per candidate on modern hardware. This is intentional — it makes brute-force very slow. A 1,000-word dictionary takes 1-8 minutes.
+            """
+        )
+        close_box()
+
+
+# ---------------------------------------------------------------------------
+# Electrum Wallet Recovery
+# ---------------------------------------------------------------------------
+
+def page_electrum():
+    render_section_header("\U000026A1", "ELECTRUM WALLET RECOVERY", "V1 · V2 STANDARD · V2 SEGWIT")
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        open_box("SEED DETECTION & ADDRESS DERIVATION", live=True)
+        elec_mnemonic = st.text_area(
+            "ELECTRUM MNEMONIC (v1: 12 words from Electrum list · v2: 12-13 words)",
+            key="elec_mnem",
+            height=80,
+            placeholder="Type or paste an Electrum v1 or v2 mnemonic here",
+        )
+        elec_passphrase = st.text_input(
+            "PASSPHRASE (v2 only, optional)",
+            key="elec_pass",
+            type="password",
+            placeholder="Leave blank if no passphrase was set",
+        )
+        elec_count = st.number_input("ADDRESSES TO DERIVE", 1, 50, value=10, key="elec_count")
+
+        if _btn("DETECT & DERIVE", key="elec_derive", variant="cyan"):
+            mn = st.session_state.get("elec_mnem", "").strip()
+            if not mn:
+                st.warning("Enter a mnemonic.")
+                st.stop()
+            version = detect_electrum_version(mn)
+            st.markdown(f"**Detected version**: `{version}`")
+            if version == "unknown":
+                st.warning(
+                    "Mnemonic not recognised as Electrum v1 or v2. "
+                    "Attempting derivation anyway — results may be incorrect."
+                )
+            try:
+                pas = st.session_state.get("elec_pass", "")
+                addrs = derive_electrum_addresses(mn, passphrase=pas, count=int(elec_count))
+            except Exception as e:
+                st.error(f"Derivation failed: {e}")
+                log_event("err", f"Electrum derive error: {e}")
+                st.stop()
+            log_event("ok", f"Electrum {version}: {len(addrs)} addresses derived")
+            rows = [[r.get("version",""), r.get("type", r.get("version","")), r.get("path_desc",""), r["address"]] for r in addrs]
+            render_data_table(["VERSION", "TYPE", "PATH", "ADDRESS"], rows)
+            st.session_state["last_derivations"] = addrs
+        close_box()
+
+        open_box("ADDRESS FINDER", live=True)
+        elec_target = st.text_input(
+            "TARGET ADDRESS (scan to find which index holds it)",
+            key="elec_target",
+            placeholder="1…  or  bc1…  (BTC address)",
+        )
+        elec_depth = st.number_input("SCAN DEPTH (addresses per direction)", 1, 200, value=50, key="elec_depth")
+        if _btn("FIND ADDRESS", key="elec_find", variant="green"):
+            mn = st.session_state.get("elec_mnem", "").strip()
+            tgt = st.session_state.get("elec_target", "").strip()
+            if not mn or not tgt:
+                st.warning("Mnemonic and target address are required.")
+                st.stop()
+            try:
+                pas = st.session_state.get("elec_pass", "")
+                result = find_electrum_address(mn, tgt, passphrase=pas, count=int(elec_depth))
+            except ValueError as e:
+                st.error(str(e))
+                log_event("err", f"Electrum finder error: {e}")
+                st.stop()
+            if result["match"]:
+                m = result["match"]
+                log_event("ok", f"Electrum address found: {m['path_desc']}")
+                st.success("Address found!")
+                render_rblock([
+                    ("VERSION", result["version"], "ra"),
+                    ("TYPE", m.get("type", m.get("version", "")), "ra"),
+                    ("PATH", m["path_desc"], "rv"),
+                    ("ADDRESS", m["address"], "rv"),
+                    ("SEARCHED", f"{result['searched']:,} candidates", "rk"),
+                ])
+            else:
+                log_event("warn", f"Electrum finder: no match in {result['searched']} candidates")
+                st.error(f"Address not found in {result['searched']:,} candidates. Try increasing scan depth.")
+        close_box()
+
+        open_box("V2 PASSPHRASE RECOVERY (DICTIONARY ATTACK)", live=True)
+        st.caption(
+            "If the Electrum v2 seed is known but the optional passphrase was forgotten, "
+            "test candidates from a wordlist."
+        )
+        ev2_wl_tab1, ev2_wl_tab2 = st.tabs(["PASTE WORDLIST", "UPLOAD FILE"])
+        with ev2_wl_tab1:
+            ev2_wordlist = st.text_area("WORDS / PHRASES", key="ev2_wordlist", height=100,
+                                        placeholder="password\nsecret\n2021\n...")
+        with ev2_wl_tab2:
+            ev2_uploaded = st.file_uploader("Upload .txt wordlist", type=["txt"], key="ev2_wl_file")
+            if ev2_uploaded:
+                ev2_wordlist = ev2_uploaded.read().decode("utf-8", errors="replace")
+                st.success(f"Loaded {len([l for l in ev2_wordlist.splitlines() if l.strip()]):,} lines")
+        ev2_target = st.text_input("TARGET ADDRESS (required)", key="ev2_target", placeholder="1…  or  bc1…")
+
+        if _btn("ATTACK V2 PASSPHRASE", key="ev2_attack_run", variant="red", use_container_width=True):
+            mn = st.session_state.get("elec_mnem", "").strip()
+            wl_text = st.session_state.get("ev2_wordlist", "")
+            tgt = st.session_state.get("ev2_target", "").strip()
+            if not mn:
+                st.error("Enter an Electrum v2 mnemonic above.")
+                st.stop()
+            if not tgt:
+                st.error("Target address is required.")
+                st.stop()
+            if not wl_text.strip():
+                st.error("Wordlist is empty.")
+                st.stop()
+            from passphrase_utils import build_candidate_list
+            candidates = build_candidate_list(wl_text, set())
+            log_event("info", f"Electrum v2 passphrase attack: {len(candidates):,} candidates")
+            ev2_prog = st.progress(0.0)
+            ev2_status = st.empty()
+
+            def _ev2_cb(checked, total, found):
+                pct = min(1.0, checked / total)
+                ev2_prog.progress(pct)
+                ev2_status.markdown(f"**Checked**: {checked:,} / {total:,} | **Matches**: {found}")
+
+            with st.spinner("Running Electrum v2 passphrase attack…"):
+                try:
+                    result = recover_electrum_v2_passphrase(mn, candidates, tgt, progress_callback=_ev2_cb)
+                except ValueError as e:
+                    st.error(str(e))
+                    st.stop()
+
+            render_status_cards([
+                ("TESTED", f"{result['checked']:,}", ""),
+                ("ELAPSED", f"{result['elapsed_time']:.1f}s", ""),
+                ("SPEED", f"{int(result['checked'] / (result['elapsed_time'] or 0.001)):,}/s", "green"),
+            ])
+            if result["matches"]:
+                st.balloons()
+                log_event("ok", f"Electrum v2 passphrase found: {len(result['matches'])} match(es)")
+                st.success(f"Found {len(result['matches'])} matching passphrase(s)!")
+                for m in result["matches"]:
+                    st.code(
+                        f"Passphrase: {m['passphrase']}\n"
+                        f"Found at  : change={m['change']}, index={m['index']}",
+                        language="text",
+                    )
+            else:
+                log_event("warn", "Electrum v2 passphrase attack: no matches")
+                st.error("No passphrase matched. Try a larger wordlist.")
+        close_box()
+
+    with col2:
+        render_terminal("recovery :: electrum")
+        open_box("ELECTRUM VERSIONS")
+        st.markdown(
+            """
+**Electrum v1** (pre-2013)
+- 12 words from a 1,626-word English list
+- No passphrase support
+- Legacy P2PKH addresses only
+
+**Electrum v2 Standard** (2013+)
+- 12-13 words, Electrum-specific wordlist
+- Optional passphrase
+- Legacy BTC addresses
+
+**Electrum v2 Segwit** (2017+)
+- Same word count, different seed type prefix
+- Optional passphrase
+- Native segwit (bech32) addresses
+
+**Version is auto-detected** from the mnemonic. If detection fails, both v2 types are tried.
+            """
+        )
+        close_box()
+
+
+# ---------------------------------------------------------------------------
+# Brain Wallet Recovery
+# ---------------------------------------------------------------------------
+
+def page_brain_wallet():
+    render_section_header("\U0001F9E0", "BRAIN WALLET RECOVERY", "SHA256 / KECCAK256 → PRIVATE KEY")
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        open_box("SINGLE PASSPHRASE TEST", live=True)
+        bw_pass = st.text_input(
+            "PASSPHRASE / PHRASE",
+            key="bw_single",
+            placeholder="correct horse battery staple",
+        )
+        if _btn("DERIVE ADDRESSES", key="bw_derive", variant="cyan"):
+            p = bw_pass.strip()
+            if not p:
+                st.warning("Enter a passphrase.")
+                st.stop()
+            log_event("info", f"Brain wallet derive: passphrase len={len(p)}")
+            addrs = brain_wallet_all(p)
+            if addrs:
+                render_rblock([(r["algorithm"], r["address"], "rv") for r in addrs])
+                st.caption(
+                    "These are the addresses produced by hashing your passphrase into a private key. "
+                    "If any matches your target address, the passphrase is correct."
+                )
+            else:
+                st.error("Could not derive any addresses. Check the passphrase.")
+        close_box()
+
+        open_box("DICTIONARY ATTACK", live=True)
+        bw_target = st.text_input(
+            "TARGET ADDRESS (required)",
+            key="bw_target",
+            placeholder="1…  or  0x…  (BTC or ETH brain wallet address)",
+        )
+        bw_tab1, bw_tab2 = st.tabs(["PASTE WORDLIST", "UPLOAD FILE"])
+        with bw_tab1:
+            bw_wordlist = st.text_area("WORDS / PHRASES", key="bw_wordlist", height=120,
+                                       placeholder="secret\nmywallet\n2022\ncorrect horse battery staple\n...")
+        with bw_tab2:
+            bw_uploaded = st.file_uploader("Upload .txt wordlist", type=["txt"], key="bw_wl_file")
+            if bw_uploaded:
+                bw_wordlist = bw_uploaded.read().decode("utf-8", errors="replace")
+                st.success(f"Loaded {len([l for l in bw_wordlist.splitlines() if l.strip()]):,} lines")
+
+        bw_use_mutations = st.checkbox(
+            "Apply mutation rules to wordlist (capitalize, numbers, symbols…)",
+            value=False, key="bw_mutations",
+        )
+        if bw_use_mutations:
+            bw_selected_rules: set[str] = set()
+            bw_rule_cols = st.columns(2)
+            for i, (rk, rl) in enumerate(MUTATION_RULES.items()):
+                with bw_rule_cols[i % 2]:
+                    if st.checkbox(rl, key=f"bw_rule_{rk}"):
+                        bw_selected_rules.add(rk)
+        else:
+            bw_selected_rules = set()
+
+        bw_active_wl = st.session_state.get("bw_wordlist", "")
+        if bw_active_wl.strip():
+            est_base = len([l for l in bw_active_wl.splitlines() if l.strip()])
+            from passphrase_utils import estimate_candidate_count
+            est = estimate_candidate_count(bw_active_wl, bw_selected_rules) if bw_use_mutations else est_base
+            st.caption(f"Estimated candidates: **{est:,}** — Brain wallet hashing is very fast (~100,000+/sec).")
+
+        if _btn("ATTACK BRAIN WALLET", key="bw_attack_run", variant="red", use_container_width=True):
+            tgt = st.session_state.get("bw_target", "").strip()
+            wl_text = st.session_state.get("bw_wordlist", "")
+            if not tgt:
+                st.error("Target address is required.")
+                st.stop()
+            if not wl_text.strip():
+                st.error("Wordlist is empty.")
+                st.stop()
+            from passphrase_utils import build_candidate_list
+            candidates = build_candidate_list(wl_text, bw_selected_rules)
+            log_event("info", f"Brain wallet attack: {len(candidates):,} candidates, target {tgt[:12]}…")
+
+            bw_prog = st.progress(0.0)
+            bw_status = st.empty()
+
+            def _bw_cb(checked, total, found):
+                pct = min(1.0, checked / total)
+                bw_prog.progress(pct)
+                bw_status.markdown(f"**Checked**: {checked:,} / {total:,} | **Matches**: {found}")
+
+            with st.spinner("Attacking brain wallet…"):
+                try:
+                    result = attack_brain_wallet(candidates, tgt, progress_callback=_bw_cb)
+                except ValueError as e:
+                    st.error(str(e))
+                    st.stop()
+
+            render_status_cards([
+                ("TESTED", f"{result['checked']:,}", ""),
+                ("ELAPSED", f"{result['elapsed_time']:.1f}s", ""),
+                ("SPEED", f"{int(result['checked'] / (result['elapsed_time'] or 0.001)):,}/s", "green"),
+            ])
+            if result["matches"]:
+                st.balloons()
+                log_event("ok", f"Brain wallet: {len(result['matches'])} match(es) found")
+                st.success(f"Found {len(result['matches'])} matching passphrase(s)!")
+                for m in result["matches"]:
+                    st.code(
+                        f"Passphrase: {m['passphrase']}\n"
+                        f"Address   : {m['address']}\n"
+                        f"Algorithm : {m['algorithm']}",
+                        language="text",
+                    )
+            else:
+                log_event("warn", "Brain wallet attack: no matches")
+                st.error("No passphrase matched. Try a larger wordlist or different mutation rules.")
+        close_box()
+
+    with col2:
+        render_terminal("recovery :: brain-wallet")
+        open_box("HOW BRAIN WALLETS WORK")
+        st.markdown(
+            """
+A brain wallet derives a private key by hashing a passphrase — no seed phrase needed.
+
+**BTC brain wallet**
+```
+SHA-256(passphrase) → 32-byte private key
+→ secp256k1 public key → P2PKH address
+```
+
+**ETH brain wallet**
+```
+keccak-256(passphrase) → 32-byte private key
+→ secp256k1 public key → Ethereum address
+```
+*(Some tools used SHA-256 instead of keccak for ETH — both are tested)*
+
+**Why they're insecure**: Any memorable phrase is in a dictionary. Brain wallets are trivially attacked by anyone who knows the target address.
+
+**Speed**: SHA-256 and keccak are extremely fast — 100,000–500,000 candidates/sec on 8 cores.
+            """
+        )
+        close_box()
+
+
 def page_typo_lab():
-    render_section_header("\U0001F520", "TYPO CORRECTION LAB", "LEVENSHTEIN SUGGESTIONS")
+    render_section_header("\U0001F520", "TYPO CORRECTION LAB", "KEYBOARD · PHONETIC · EDIT-DISTANCE")
     col1, col2 = st.columns([3, 2])
     with col1:
         open_box("WORDLIST TYPO ANALYZER", live=True)
@@ -1829,15 +3125,41 @@ def page_typo_lab():
                     unk = result["unknown_words"]
                     log_event("warn", f"Found {len(unk)} unknown word(s)")
                     st.warning(f"Found {len(unk)} word(s) not in the BIP39 list.")
-                    headers = ["#", "POSITION", "WORD", "SUGGESTIONS"]
-                    rows = [
-                        [str(i + 1), str(u["position"] + 1), u["word"], ", ".join(u["suggestions"])]
-                        for i, u in enumerate(unk)
-                    ]
-                    render_data_table(headers, rows)
+                    for u in unk:
+                        st.markdown(f"**Position {u['position'] + 1}: `{u['word']}`**")
+                        detail = u.get("suggestions_detail", [])
+                        if detail:
+                            method_icon = {"keyboard": "⌨️", "phonetic": "🔊", "edit-distance": "✏️"}
+                            rows = [
+                                [
+                                    method_icon.get(s["method"], "") + " " + s["method"],
+                                    s["word"],
+                                ]
+                                for s in detail
+                            ]
+                            render_data_table(["METHOD", "SUGGESTION"], rows)
+                        else:
+                            st.write(", ".join(u["suggestions"]))
+                        st.markdown("---")
         close_box()
     with col2:
         render_terminal("recovery :: typo")
+        open_box("MATCHING METHODS")
+        st.markdown(
+            """
+**⌨️ Keyboard adjacency**
+Finds BIP39 words reachable by substituting one character with an adjacent QWERTY key. Catches the most common single-finger typos.
+
+**🔊 Phonetic (Soundex)**
+Groups words that sound alike. Catches vowel-swap errors and phonetically similar but differently-spelled words.
+
+**✏️ Edit distance (Levenshtein)**
+Counts minimum insertions, deletions, or substitutions. Catches any other spelling mistake.
+
+Results are ranked: keyboard hits first, then phonetic, then edit-distance.
+            """
+        )
+        close_box()
 
 
 def render_feasibility_report(search_space: int, target_address_provided: bool, word_count: int) -> str:
@@ -2100,7 +3422,7 @@ def page_passphrase():
 
 
 def page_derivation():
-    render_section_header("⚡", "DERIVATION PATH SCANNER", "COMPARE BIP44/49/84")
+    render_section_header("⚡", "DERIVATION PATH SCANNER", "BIP44/49/84 · MULTI-COIN · HARDWARE PRESETS")
     col1, col2 = st.columns([3, 2])
     with col1:
         open_box("ALL STANDARDS SCAN", live=True)
@@ -2121,46 +3443,233 @@ def page_derivation():
                 render_data_table(["COIN", "TYPE", "PATH", "ADDRESS"], rows)
                 st.session_state["last_derivations"] = rows_data
         close_box()
+
+        with st.expander("HARDWARE WALLET PRESETS — DERIVE BY BRAND", expanded=False):
+            st.caption(
+                "Select a hardware wallet brand to derive addresses using that wallet's exact path scheme. "
+                "Useful for verifying which addresses a given seed produces on a specific device."
+            )
+            preset_options = list(HARDWARE_WALLET_PRESETS.keys())
+            dp_preset = st.selectbox("SELECT PRESET", preset_options, key="dp_hw_preset")
+            if dp_preset:
+                p_info = HARDWARE_WALLET_PRESETS[dp_preset]
+                st.markdown(f"**{dp_preset}** — {p_info['description']}")
+                if "note" in p_info:
+                    st.info(p_info["note"])
+            if _btn("DERIVE WITH PRESET", key="dp_hw_run", variant="purple"):
+                mn = st.session_state.get("dp_mnem", "").strip()
+                if not mn:
+                    st.warning("Provide a mnemonic above first.")
+                else:
+                    try:
+                        hw_result = run_hardware_preset(mn, dp_preset)
+                    except ValueError as e:
+                        st.error(str(e))
+                        log_event("err", f"HW preset derive error: {e}")
+                        st.stop()
+                    cands = hw_result.get("candidates", [])
+                    log_event("ok", f"HW preset '{dp_preset}': {len(cands)} addresses derived")
+                    if cands:
+                        rows = []
+                        for r in cands:
+                            rows.append([
+                                r.get("coin", ""),
+                                r.get("label", ""),
+                                r.get("path", ""),
+                                r.get("address", ""),
+                            ])
+                        render_data_table(["COIN", "TYPE", "PATH", "ADDRESS"], rows)
+                        st.session_state["last_derivations"] = cands
+                    else:
+                        st.warning("No addresses derived. Check mnemonic validity.")
+
+        with st.expander("MULTI-COIN DERIVATION — SELECT COINS", expanded=False):
+            st.caption("Derive addresses for any combination of supported coins.")
+            mc_coins: list[str] = []
+            mc_cols = st.columns(2)
+            for gi, (group_label, coin_ids) in enumerate(COIN_GROUPS.items()):
+                with mc_cols[gi % 2]:
+                    default_on = any(c in DEFAULT_SCAN_COINS for c in coin_ids)
+                    if st.checkbox(group_label, value=default_on, key=f"dp_mc_{gi}"):
+                        mc_coins.extend(coin_ids)
+            mc_per_coin = st.number_input("ADDRESSES PER COIN", 1, 20, value=5, key="dp_mc_count")
+            if _btn("DERIVE MULTI-COIN", key="dp_mc_run", variant="green"):
+                mn = st.session_state.get("dp_mnem", "").strip()
+                if not mn:
+                    st.warning("Provide a mnemonic above first.")
+                elif not mc_coins:
+                    st.warning("Select at least one coin group.")
+                else:
+                    all_rows: list[list] = []
+                    errors: list[str] = []
+                    for cid in mc_coins:
+                        try:
+                            addrs = derive_coin_addresses(mn, cid, count=int(mc_per_coin))
+                            for r in addrs:
+                                all_rows.append([r["coin"], r.get("label", ""), r["path"], r["address"]])
+                        except Exception as e:
+                            errors.append(f"{cid}: {e}")
+                    if errors:
+                        for err in errors:
+                            st.warning(err)
+                    if all_rows:
+                        log_event("ok", f"Multi-coin: {len(all_rows)} addresses derived")
+                        render_data_table(["COIN", "TYPE", "PATH", "ADDRESS"], all_rows)
+                    else:
+                        st.warning("No addresses derived.")
     with col2:
         render_terminal("derivation :: scanner")
+        open_box("SUPPORTED COINS")
+        coin_lines = []
+        for cid, cfg in COIN_REGISTRY.items():
+            coin_lines.append(f"- **{cfg['symbol']}** — {cfg['name']} (`{cfg['purpose']}'/{cfg['coin_type']}'`)")
+        st.markdown("\n".join(coin_lines))
+        close_box()
 
 
 def page_address_matcher():
-    render_section_header("\U0001F3AF", "KNOWN ADDRESS MATCHER", "SCAN STANDARD WINDOW")
+    render_section_header("\U0001F3AF", "KNOWN ADDRESS MATCHER", "MULTI-COIN · HARDWARE PRESETS · BIP44/49/84")
     col1, col2 = st.columns([3, 2])
     with col1:
+        # --- Hardware wallet preset ---
+        open_box("HARDWARE WALLET PRESET (optional)")
+        preset_names = ["— None (manual coin selection) —"] + list(HARDWARE_WALLET_PRESETS.keys())
+        chosen_preset = st.selectbox("HARDWARE WALLET PRESET", preset_names, key="am_preset")
+        if chosen_preset != "— None (manual coin selection) —":
+            p = HARDWARE_WALLET_PRESETS[chosen_preset]
+            st.caption(p["description"])
+            if "note" in p:
+                st.info(p["note"])
+        close_box()
+
         open_box("ADDRESS LOOKUP", live=True)
         mnemonic = st.text_area("MNEMONIC", key="am_mnem", height=90)
         target = st.text_input("TARGET ADDRESS", key="am_target")
-        depth = st.number_input("ADDRESSES PER STANDARD", 1, 50, value=20, key="am_depth")
+
+        # Coin selector — hidden when preset is active
+        if chosen_preset == "— None (manual coin selection) —":
+            st.markdown("**SELECT COINS TO SCAN**")
+            selected_coins: list[str] = []
+            for group_label, coin_ids in COIN_GROUPS.items():
+                # pre-check groups whose coins are in DEFAULT_SCAN_COINS
+                default_on = any(c in DEFAULT_SCAN_COINS for c in coin_ids)
+                if st.checkbox(group_label, value=default_on, key=f"am_grp_{group_label}"):
+                    selected_coins.extend(coin_ids)
+            depth = st.number_input("ADDRESSES PER COIN (per account)", 1, 50, value=10, key="am_depth")
+        else:
+            selected_coins = []
+            depth = 10
+
         if _btn("FIND ADDRESS", key="am_run", variant="cyan"):
             if not (mnemonic.strip() and target.strip()):
                 st.warning("Mnemonic and target address required.")
-            else:
+                st.stop()
+
+            # --- Hardware preset path ---
+            if chosen_preset != "— None (manual coin selection) —":
                 try:
-                    result = find_address_match(mnemonic, target, max_addresses_per_standard=int(depth))
+                    result = run_hardware_preset(mnemonic, chosen_preset, target_address=target)
                 except ValueError as e:
                     st.error(str(e))
-                    log_event("err", f"Matcher error: {e}")
-                    return
+                    log_event("err", f"Preset matcher error: {e}")
+                    st.stop()
                 if result["match"]:
                     m = result["match"]
-                    log_event("ok", f"Address match: {m['path']}")
+                    log_event("ok", f"Preset match: {m['path']}")
+                    st.success("Address found via hardware wallet preset!")
+                    render_rblock([
+                        ("PRESET", result["preset"], "ra"),
+                        ("COIN", m["coin"], "ra"),
+                        ("PATH", m["path"], "rv"),
+                        ("ADDRESS", m["address"], "rv"),
+                        ("ACCOUNT", str(m.get("account", 0)), "rk"),
+                        ("INDEX", str(m.get("index", 0)), "rk"),
+                    ])
+                    if result.get("note"):
+                        st.info(result["note"])
+                else:
+                    log_event("warn", f"No preset match — {result.get('preset')}")
+                    st.error(
+                        f"No match found with preset '{chosen_preset}'. "
+                        "Try a different preset or use manual coin selection."
+                    )
+                st.session_state["last_derivations"] = result.get("candidates", [])
+
+            # --- Multi-coin manual scan ---
+            else:
+                if not selected_coins:
+                    st.warning("Select at least one coin group.")
+                    st.stop()
+                try:
+                    result = find_address_match_extended(
+                        mnemonic,
+                        target,
+                        coin_ids=selected_coins,
+                        count_per_coin=int(depth),
+                        scan_accounts=2,
+                    )
+                except ValueError as e:
+                    st.error(str(e))
+                    log_event("err", f"Multi-coin matcher error: {e}")
+                    st.stop()
+                if result["match"]:
+                    m = result["match"]
+                    log_event("ok", f"Multi-coin match: {m['path']} ({m['coin']})")
+                    st.success(f"Address matched! Coin: {m['coin']} — Path: {m['path']}")
                     render_rblock([
                         ("MATCH", "FOUND", "rv"),
                         ("COIN", m["coin"], "ra"),
-                        ("TYPE", m["address_type"], "ra"),
+                        ("LABEL", m.get("label", ""), "ra"),
                         ("PATH", m["path"], "rv"),
                         ("ADDRESS", m["address"], "rv"),
-                        ("SEARCHED", f"{result['searched']} candidates", "rk"),
+                        ("ACCOUNT", str(m.get("account", 0)), "rk"),
+                        ("INDEX", str(m.get("index", 0)), "rk"),
+                        ("SEARCHED", f"{result['searched']:,} candidates", "rk"),
                     ])
+                    if m.get("evm_note"):
+                        st.info(m["evm_note"])
                 else:
-                    log_event("warn", f"No match in {result['searched']} candidates")
-                    st.error(f"No match found in {result['searched']} candidates.")
-                st.session_state["last_derivations"] = result["candidates"]
+                    log_event("warn", f"No multi-coin match in {result['searched']} candidates")
+                    st.error(
+                        f"No match in {result['searched']:,} candidates across {len(selected_coins)} coin type(s). "
+                        "Try a hardware wallet preset, increase depth, or check the address."
+                    )
+                st.session_state["last_derivations"] = result.get("candidates", [])
         close_box()
+
+        # Preview of candidates table from last run
+        if st.session_state.get("last_derivations"):
+            cands = st.session_state["last_derivations"]
+            with st.expander(f"LAST SCAN — {len(cands)} DERIVED ADDRESSES", expanded=False):
+                rows = []
+                for r in cands:
+                    rows.append([
+                        r.get("coin", ""),
+                        r.get("label", r.get("address_type", "")),
+                        r.get("path", ""),
+                        r.get("address", ""),
+                    ])
+                render_data_table(["COIN", "TYPE", "PATH", "ADDRESS"], rows)
+
     with col2:
         render_terminal("derivation :: matcher")
+        open_box("SCAN COVERAGE")
+        st.markdown(
+            """
+**Manual mode** — choose any combination of:
+- EVM (ETH / BSC / Polygon / Avalanche-C / Arbitrum / Optimism)
+- Bitcoin (Native SegWit / SegWit / Legacy)
+- Litecoin, Dogecoin, XRP, TRX, SOL, ATOM, BNB
+
+**Hardware preset mode** — uses the exact derivation paths each wallet brand generates:
+- Ledger Live / Legacy
+- Trezor, MetaMask, Trust Wallet
+- Coldcard, KeepKey
+
+Accounts 0-3 scanned by default to catch wallets where the user clicked "Add account" multiple times.
+            """
+        )
+        close_box()
 
 
 def page_address_gen():
@@ -2566,7 +4075,12 @@ def page_exporter():
             st.markdown('<div class="btn-green">', unsafe_allow_html=True)
             if addresses:
                 try:
-                    pdf_bytes = build_pdf_report(addresses, notes=notes)
+                    pdf_bytes = build_pdf_report(
+                        addresses,
+                        notes=notes,
+                        case_info=active if active else None,
+                        findings=st.session_state.get("export_findings", []),
+                    )
                     st.download_button(
                         "DOWNLOAD PDF",
                         data=pdf_bytes,
@@ -2677,6 +4191,13 @@ ROUTE = {
     PAGE_TYPO_LAB: page_typo_lab,
     PAGE_WRONG_ORDER: page_wrong_order,
     PAGE_PASSPHRASE: page_passphrase,
+    PAGE_PASSPHRASE_ATTACK: page_passphrase_attack,
+    PAGE_KEY_IMPORT: page_key_import,
+    PAGE_XPUB: page_xpub_tool,
+    PAGE_SLIP39: page_slip39,
+    PAGE_BIP38: page_bip38,
+    PAGE_ELECTRUM: page_electrum,
+    PAGE_BRAIN_WALLET: page_brain_wallet,
     PAGE_DERIVATION: page_derivation,
     PAGE_ADDRESS_MATCHER: page_address_matcher,
     PAGE_ADDRESS_GEN: page_address_gen,
@@ -2693,8 +4214,9 @@ ROUTE = {
 # Pages that require offline mode (locked when LIVE_ANALYSIS active).
 OFFLINE_LOCKED_PAGES = {
     PAGE_INCOMPLETE_SEED, PAGE_TYPO_LAB, PAGE_WRONG_ORDER,
-    PAGE_PASSPHRASE, PAGE_DERIVATION, PAGE_ADDRESS_MATCHER,
+    PAGE_PASSPHRASE, PAGE_PASSPHRASE_ATTACK, PAGE_DERIVATION, PAGE_ADDRESS_MATCHER,
     PAGE_ADDRESS_GEN, PAGE_BIP39_VALIDATION, PAGE_VAULT_INSPECT,
+    PAGE_KEY_IMPORT, PAGE_XPUB, PAGE_SLIP39, PAGE_BIP38, PAGE_ELECTRUM, PAGE_BRAIN_WALLET,
     PAGE_RECOVERY_SELECTOR,
 }
 LIVE_LOCKED_PAGES = {PAGE_LIVE_ADDR, PAGE_LIVE_TX}
@@ -2716,14 +4238,16 @@ ROLES = {
     "Senior Analyst": [
         PAGE_SECURITY_LANDING, PAGE_CASE_MGMT, PAGE_EVIDENCE_HASH,
         PAGE_RECOVERY_SELECTOR, PAGE_BIP39_VALIDATION, PAGE_INCOMPLETE_SEED, PAGE_TYPO_LAB, PAGE_WRONG_ORDER,
-        PAGE_PASSPHRASE, PAGE_DERIVATION, PAGE_ADDRESS_MATCHER, PAGE_ADDRESS_GEN,
+        PAGE_PASSPHRASE, PAGE_PASSPHRASE_ATTACK, PAGE_DERIVATION, PAGE_ADDRESS_MATCHER, PAGE_ADDRESS_GEN,
+        PAGE_BIP38, PAGE_ELECTRUM, PAGE_BRAIN_WALLET, PAGE_KEY_IMPORT, PAGE_XPUB, PAGE_SLIP39,
         PAGE_ENTROPY, PAGE_HASH_TOOLS, PAGE_VAULT_INSPECT, PAGE_AIRGAP_GUIDE, PAGE_EDUCATION,
         PAGE_WIPE, PAGE_EXPORTER, PAGE_LIVE_ADDR, PAGE_LIVE_TX
     ],
     "Admin": [
         PAGE_SECURITY_LANDING, PAGE_CASE_MGMT, PAGE_EVIDENCE_HASH,
         PAGE_RECOVERY_SELECTOR, PAGE_BIP39_VALIDATION, PAGE_INCOMPLETE_SEED, PAGE_TYPO_LAB, PAGE_WRONG_ORDER,
-        PAGE_PASSPHRASE, PAGE_DERIVATION, PAGE_ADDRESS_MATCHER, PAGE_ADDRESS_GEN,
+        PAGE_PASSPHRASE, PAGE_PASSPHRASE_ATTACK, PAGE_DERIVATION, PAGE_ADDRESS_MATCHER, PAGE_ADDRESS_GEN,
+        PAGE_BIP38, PAGE_ELECTRUM, PAGE_BRAIN_WALLET, PAGE_KEY_IMPORT, PAGE_XPUB, PAGE_SLIP39,
         PAGE_ENTROPY, PAGE_HASH_TOOLS, PAGE_VAULT_INSPECT, PAGE_AIRGAP_GUIDE, PAGE_EDUCATION,
         PAGE_WIPE, PAGE_EXPORTER, PAGE_LIVE_ADDR, PAGE_LIVE_TX
     ]
@@ -2820,9 +4344,16 @@ PAGE_MODULE_MAP = {
     PAGE_TYPO_LAB: "recovery",
     PAGE_WRONG_ORDER: "recovery",
     PAGE_PASSPHRASE: "recovery",
+    PAGE_PASSPHRASE_ATTACK: "recovery",
     PAGE_DERIVATION: "recovery",
     PAGE_ADDRESS_MATCHER: "recovery",
     PAGE_ADDRESS_GEN: "recovery",
+    PAGE_KEY_IMPORT: "recovery",
+    PAGE_XPUB: "recovery",
+    PAGE_SLIP39: "recovery",
+    PAGE_BIP38: "recovery",
+    PAGE_ELECTRUM: "recovery",
+    PAGE_BRAIN_WALLET: "recovery",
     PAGE_VAULT_INSPECT: "forensic",
     PAGE_CASE_MGMT: "forensic",
     PAGE_EVIDENCE_HASH: "forensic",

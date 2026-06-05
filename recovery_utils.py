@@ -72,6 +72,14 @@ _MAX_RETURNED_CANDIDATES = 100
 # Placeholder character that the caller substitutes in for unknown words.
 _UNKNOWN_TOKEN = "?"
 
+# Wild-card character used for partial-word patterns (e.g. "aban*").
+_WILDCARD = "*"
+
+# Hard cap on total search-space combinations. For pure-? unknowns this
+# equals 2048^2 ≈ 4.2 M. For partial patterns the same cap applies to the
+# product of per-position candidate counts.
+_SEARCH_SPACE_CAP = 4_200_000
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers & Multiprocessing Workers
@@ -115,6 +123,125 @@ def _levenshtein(a: str, b: str) -> int:
     return prev[-1]
 
 
+# ---------------------------------------------------------------------------
+# Keyboard adjacency map (QWERTY)
+# ---------------------------------------------------------------------------
+
+_QWERTY_ADJACENCY: dict[str, frozenset[str]] = {
+    "q": frozenset("was"),
+    "w": frozenset("qesad"),
+    "e": frozenset("wrsdf"),
+    "r": frozenset("etdfg"),
+    "t": frozenset("ryfgh"),
+    "y": frozenset("tughj"),
+    "u": frozenset("yihjk"),
+    "i": frozenset("uojkl"),
+    "o": frozenset("ipkl"),
+    "p": frozenset("ol"),
+    "a": frozenset("qwszx"),
+    "s": frozenset("awedxzc"),
+    "d": frozenset("serfcxv"),
+    "f": frozenset("drtgvbc"),
+    "g": frozenset("ftyhbvn"),
+    "h": frozenset("gyujnbm"),
+    "j": frozenset("huikmn"),
+    "k": frozenset("jiolm"),
+    "l": frozenset("kop"),
+    "z": frozenset("asx"),
+    "x": frozenset("zsdc"),
+    "c": frozenset("xdfv"),
+    "v": frozenset("cfgb"),
+    "b": frozenset("vghn"),
+    "n": frozenset("bhjm"),
+    "m": frozenset("njk"),
+}
+
+
+def _soundex(word: str) -> str:
+    """
+    American Soundex phonetic code.
+    Returns a 4-character code, e.g. 'abandon' → 'A153'.
+    Words with the same code sound phonetically similar.
+    """
+    if not word:
+        return "0000"
+    word = word.lower()
+    _table = {
+        "b": "1", "f": "1", "p": "1", "v": "1",
+        "c": "2", "g": "2", "j": "2", "k": "2",
+        "q": "2", "s": "2", "x": "2", "z": "2",
+        "d": "3", "t": "3",
+        "l": "4",
+        "m": "5", "n": "5",
+        "r": "6",
+    }
+    first = word[0].upper()
+    code = first
+    prev = _table.get(word[0], "0")
+    for ch in word[1:]:
+        c = _table.get(ch, "0")
+        if c != "0" and c != prev:
+            code += c
+        prev = c
+    return (code + "000")[:4]
+
+
+# Pre-built soundex index over the BIP39 wordlist (populated on first use).
+_SOUNDEX_INDEX: dict[str, list[str]] = {}
+
+
+def _get_soundex_index() -> dict[str, list[str]]:
+    global _SOUNDEX_INDEX
+    if not _SOUNDEX_INDEX:
+        for w in _english_wordlist():
+            code = _soundex(w)
+            _SOUNDEX_INDEX.setdefault(code, []).append(w)
+    return _SOUNDEX_INDEX
+
+
+def _keyboard_typos(word: str, wordlist_set: frozenset[str]) -> list[str]:
+    """
+    Return BIP39 words reachable from `word` by substituting exactly one
+    character with an adjacent key on a QWERTY layout.
+    """
+    matches: list[str] = []
+    word = word.lower()
+    for i, ch in enumerate(word):
+        for neighbor in _QWERTY_ADJACENCY.get(ch, frozenset()):
+            candidate = word[:i] + neighbor + word[i + 1:]
+            if candidate in wordlist_set:
+                matches.append(candidate)
+    return matches
+
+
+def _expand_pattern(token: str, sorted_wordlist: list[str]) -> list[str]:
+    """
+    Expand a variable token to the list of matching BIP39 words.
+
+    Supported syntax (case-insensitive, lowercase normalised):
+      "?"       – fully unknown: returns all 2048 words
+      "abc*"    – prefix match: words starting with "abc"
+      "*abc"    – suffix match: words ending with "abc"
+      "a*c"     – prefix+suffix: words starting with "a" AND ending with "c"
+      "*"       – alias for "?": all words
+
+    Returns an empty list when the pattern matches nothing (caller should
+    raise a descriptive ValueError in that case).
+    """
+    t = token.lower().strip()
+    if t == _UNKNOWN_TOKEN or t == _WILDCARD:
+        return sorted_wordlist
+    if _WILDCARD not in t:
+        # Not a pattern – exact lookup (used internally; caller already
+        # validated that exact words are in the wordlist).
+        return [t] if t in set(sorted_wordlist) else []
+    prefix, _, tail = t.partition(_WILDCARD)
+    # If there's another wildcard in the tail, take everything after the LAST
+    # one as the required suffix.
+    suffix = tail.rsplit(_WILDCARD, 1)[-1] if _WILDCARD in tail else tail
+    return [w for w in sorted_wordlist if w.startswith(prefix) and w.endswith(suffix)]
+
+
 def _first_address_matches(mnemonic: str, target_address: str) -> bool:
     """
     Return True if `target_address` appears in the first window of standard
@@ -135,36 +262,39 @@ def _first_address_matches(mnemonic: str, target_address: str) -> bool:
 
 def _recover_chunk_worker(args) -> dict:
     """
-    Multiprocessing worker for missing-word recovery.
-    args: (words, unknown_positions, first_word_chunk, sorted_wordlist, target_address)
+    Multiprocessing worker for missing/partial-word recovery.
+
+    args: (words, variable_positions, first_word_chunk,
+           remaining_cands_list, target_address)
+
+      variable_positions  – list of word indices that are variable (? or pattern)
+      first_word_chunk    – subset of the first position's candidate list
+      remaining_cands_list – list[list[str]] of candidate lists for positions 1..N
+      target_address      – optional address filter (None = no filter)
     """
-    words, unknown_positions, first_word_chunk, sorted_wordlist, target_address = args
+    words, variable_positions, first_word_chunk, remaining_cands_list, target_address = args
     candidates = []
     checked = 0
     checksum_passed = 0
 
-    n_unknowns = len(unknown_positions)
+    pos0 = variable_positions[0]
+    rest_positions = variable_positions[1:]
+    trial = list(words)
 
-    if n_unknowns == 1:
-        pos = unknown_positions[0]
-        trial = list(words)
-        for w1 in first_word_chunk:
+    for w0 in first_word_chunk:
+        trial[pos0] = w0
+        if not rest_positions:
             checked += 1
-            trial[pos] = w1
             candidate = " ".join(trial)
             if validate_mnemonic(candidate)["valid"]:
                 checksum_passed += 1
                 if target_address is None or _first_address_matches(candidate, target_address):
                     candidates.append(candidate)
-
-    elif n_unknowns == 2:
-        pos1, pos2 = unknown_positions
-        trial = list(words)
-        for w1 in first_word_chunk:
-            trial[pos1] = w1
-            for w2 in sorted_wordlist:
+        else:
+            for combo in product(*remaining_cands_list):
+                for pos, w in zip(rest_positions, combo):
+                    trial[pos] = w
                 checked += 1
-                trial[pos2] = w2
                 candidate = " ".join(trial)
                 if validate_mnemonic(candidate)["valid"]:
                     checksum_passed += 1
@@ -295,28 +425,40 @@ def recover_missing_words(
     progress_callback: Callable[[int, int, int], None] | None = None,
 ) -> dict:
     """
-    Brute-force fill in `?` placeholders in a partial BIP39 mnemonic using multiprocessing.
+    Brute-force fill in variable positions in a partial BIP39 mnemonic.
+
+    Variable positions are marked with one of:
+      "?"       – fully unknown (searches all 2048 BIP39 words)
+      "prefix*" – partial word with known prefix  (e.g. "aban*" → "abandon")
+      "*suffix" – partial word with known suffix  (e.g. "*don"  → "abandon")
+      "p*s"     – prefix AND suffix known         (e.g. "ab*on" → "abandon")
 
     Inputs
     ------
     mnemonic_with_q : str
-        Mnemonic where unknown words are replaced by "?".
+        Mnemonic where variable positions use the syntax above.
     target_address : str | None
-        Optional target address to filter candidates.
+        Optional — filter results to candidates that derive this address.
+        Without an address every checksum-valid candidate is returned;
+        multiple results are possible.
     max_unknowns : int
-        Max acceptable unknown slots. Hard-capped at MAX_MISSING_WORDS (2).
+        For pure-"?" inputs: hard cap on the number of "?" slots.
+        Hard-capped at MAX_MISSING_WORDS (2).  Partial-pattern positions
+        bypass this count check and are governed only by _SEARCH_SPACE_CAP.
     progress_callback : Callable[[int, int, int], None] | None
-        Callback receiving (checked_count, total_count, candidates_found).
+        Receives (checked_count, total_count, candidates_found).
 
     Returns
     -------
     dict with keys:
-        candidates : list[str]
-        checked    : int
-        checksum_passed: int
-        with_target: bool
-        truncated  : bool
-        elapsed_time: float
+        candidates            : list[str]
+        checked               : int
+        checksum_passed       : int
+        with_target           : bool
+        truncated             : bool
+        elapsed_time          : float
+        search_space          : int   – total combinations searched
+        candidates_per_position : dict[int, int]  – {word_index: n_candidates}
     """
     # --- input validation -------------------------------------------------
     if not isinstance(mnemonic_with_q, str) or not mnemonic_with_q.strip():
@@ -330,9 +472,15 @@ def recover_missing_words(
         )
 
     words = _split_normalized(mnemonic_with_q)
-    unknown_positions = [i for i, w in enumerate(words) if w == _UNKNOWN_TOKEN]
 
-    if not unknown_positions:
+    # Identify variable positions: pure unknowns (?) and partial patterns (*)
+    unknown_positions = [i for i, w in enumerate(words) if w == _UNKNOWN_TOKEN]
+    partial_positions = [i for i, w in enumerate(words) if _WILDCARD in w and w != _UNKNOWN_TOKEN]
+    variable_positions = sorted(set(unknown_positions) | set(partial_positions))
+    has_partial = bool(partial_positions)
+
+    # --- no variable positions: validate as-is ----------------------------
+    if not variable_positions:
         v = validate_mnemonic(" ".join(words))
         candidates = [" ".join(words)] if v["valid"] else []
         if candidates and target_address is not None:
@@ -345,37 +493,65 @@ def recover_missing_words(
             "with_target": target_address is not None,
             "truncated": False,
             "elapsed_time": 0.0,
+            "search_space": 1,
+            "candidates_per_position": {},
         }
 
-    if len(unknown_positions) > max_unknowns:
+    # --- count cap: pure-? inputs keep the legacy MAX_MISSING_WORDS limit --
+    if not has_partial and len(unknown_positions) > max_unknowns:
         raise ValueError(
             f"Input has {len(unknown_positions)} '?' placeholders, "
             f"exceeding max_unknowns={max_unknowns}."
         )
 
     wordlist = _english_wordlist()
-    known = [w for i, w in enumerate(words) if i not in set(unknown_positions)]
-    invalid_words = [w for w in known if w not in wordlist]
+    sorted_wordlist = sorted(wordlist)
+
+    # Fixed (non-variable) positions must be valid BIP39 words
+    fixed_words = [w for i, w in enumerate(words) if i not in set(variable_positions)]
+    invalid_words = [w for w in fixed_words if w not in wordlist]
     if invalid_words:
         raise ValueError(
-            f"Non-'?' tokens contain words not in the BIP39 English wordlist: {', '.join(invalid_words)}. "
-            "Run suggest_typo_corrections first."
+            f"Non-variable tokens contain words not in the BIP39 English wordlist: "
+            f"{', '.join(invalid_words)}. Run suggest_typo_corrections first."
+        )
+
+    # --- build per-position candidate lists --------------------------------
+    candidates_per_position: dict[int, list[str]] = {}
+    for pos in variable_positions:
+        token = words[pos]
+        cands = _expand_pattern(token, sorted_wordlist)
+        if not cands:
+            raise ValueError(
+                f"Pattern '{token}' at word position {pos + 1} matches no BIP39 words. "
+                "Check your spelling or use '?' for a fully unknown word."
+            )
+        candidates_per_position[pos] = cands
+
+    # --- search-space cap (applies to all inputs) -------------------------
+    total_combinations = 1
+    for cands in candidates_per_position.values():
+        total_combinations *= len(cands)
+
+    if total_combinations > _SEARCH_SPACE_CAP:
+        raise ValueError(
+            f"Search space of {total_combinations:,} combinations exceeds the cap of "
+            f"{_SEARCH_SPACE_CAP:,}. Use prefix patterns (e.g. 'abc*') instead of '?' "
+            "to narrow unknown positions."
         )
 
     # --- enumerate candidates using multiprocessing ----------------------
-    sorted_wordlist = sorted(wordlist)
-    total_combinations = len(sorted_wordlist) ** len(unknown_positions)
+    pos0_candidates = candidates_per_position[variable_positions[0]]
+    remaining_cands_list = [
+        candidates_per_position[pos] for pos in variable_positions[1:]
+    ]
 
-    # Divide search space into chunks for the first unknown position
-    if len(unknown_positions) == 1:
-        chunk_size = 128
-    else:
-        chunk_size = 32
-
-    chunks = [sorted_wordlist[i:i + chunk_size] for i in range(0, len(sorted_wordlist), chunk_size)]
-    tasks = []
-    for chunk in chunks:
-        tasks.append((words, unknown_positions, chunk, sorted_wordlist, target_address))
+    chunk_size = 128 if len(variable_positions) == 1 else 32
+    chunks = [pos0_candidates[i:i + chunk_size] for i in range(0, len(pos0_candidates), chunk_size)]
+    tasks = [
+        (words, variable_positions, chunk, remaining_cands_list, target_address)
+        for chunk in chunks
+    ]
 
     start_time = time.time()
     candidates: list[str] = []
@@ -411,6 +587,8 @@ def recover_missing_words(
         "with_target": target_address is not None,
         "truncated": truncated,
         "elapsed_time": elapsed_time,
+        "search_space": total_combinations,
+        "candidates_per_position": {pos: len(cands) for pos, cands in candidates_per_position.items()},
     }
 
 
@@ -421,6 +599,16 @@ def recover_missing_words(
 def suggest_typo_corrections(mnemonic: str, max_suggestions: int = 5) -> dict:
     """
     Suggest BIP39-wordlist replacements for any misspelled words.
+
+    Uses three complementary methods and merges results ranked by priority:
+      1. Keyboard adjacency (QWERTY neighbour substitution) — exact match by
+         definition; listed first if found.
+      2. Phonetic (Soundex) — same-sounding words; catches vowel swap typos.
+      3. Levenshtein edit distance — general spelling distance; catches
+         insertions, deletions, transpositions.
+
+    Each unknown word entry now includes a ``method`` field per suggestion so
+    the UI can show the user *why* each candidate was chosen.
     """
     if not isinstance(mnemonic, str):
         raise ValueError("mnemonic must be a string")
@@ -429,19 +617,50 @@ def suggest_typo_corrections(mnemonic: str, max_suggestions: int = 5) -> dict:
 
     words = _normalize_mnemonic(mnemonic).split()
     wordlist = _english_wordlist()
+    wordlist_set: frozenset[str] = frozenset(wordlist)
+    soundex_idx = _get_soundex_index()
     unknown: list[dict] = []
+
     for i, w in enumerate(words):
-        if w in wordlist:
+        if w in wordlist_set:
             continue
-        scored = sorted(
-            ((_levenshtein(w, candidate), candidate) for candidate in wordlist),
-            key=lambda t: (t[0], t[1]),
-        )
-        suggestions = [cand for _, cand in scored[:max_suggestions]]
+
+        seen: dict[str, str] = {}  # candidate → method label
+
+        # 1. Keyboard adjacency
+        for cand in _keyboard_typos(w, wordlist_set):
+            seen.setdefault(cand, "keyboard")
+
+        # 2. Phonetic (Soundex)
+        for cand in soundex_idx.get(_soundex(w), []):
+            seen.setdefault(cand, "phonetic")
+
+        # 3. Levenshtein — fill remaining slots
+        if len(seen) < max_suggestions:
+            scored = sorted(
+                ((_levenshtein(w, cand), cand) for cand in wordlist if cand not in seen),
+                key=lambda t: (t[0], t[1]),
+            )
+            for _, cand in scored:
+                seen.setdefault(cand, "edit-distance")
+                if len(seen) >= max_suggestions * 3:
+                    break
+
+        # Build ordered suggestion list (keyboard first, then phonetic, then edit-distance)
+        ordered: list[dict] = []
+        for method_priority in ("keyboard", "phonetic", "edit-distance"):
+            for cand, method in seen.items():
+                if method == method_priority:
+                    ordered.append({"word": cand, "method": method})
+
+        suggestions_full = ordered[:max_suggestions]
+        suggestions = [s["word"] for s in suggestions_full]
+
         unknown.append({
             "word": w,
             "position": i,
             "suggestions": suggestions,
+            "suggestions_detail": suggestions_full,
         })
 
     return {

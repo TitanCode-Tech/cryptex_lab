@@ -30,6 +30,7 @@ from recovery_utils import (  # noqa: E402
     recover_missing_words,
     recover_word_order,
     suggest_typo_corrections,
+    _expand_pattern,
 )
 # Imported with an alias because pytest auto-collects any top-level name
 # starting with `test_` as a test function. Renaming sidesteps that.
@@ -369,6 +370,121 @@ class TestNewRecoveryFeatures:
         assert VALID_MNEMONIC in result["candidates"]
         assert len(callback_called) > 0
         assert result["checked"] == 2
+
+
+class TestPartialWordRecovery:
+    """Tests for the partial-word pattern feature (prefix*/suffix* syntax)."""
+
+    # --- _expand_pattern unit tests ---
+
+    def test_expand_question_mark_returns_full_wordlist(self):
+        from wallet_utils import _english_wordlist
+        wl = sorted(_english_wordlist())
+        result = _expand_pattern("?", wl)
+        assert result == wl
+
+    def test_expand_prefix_pattern(self):
+        from wallet_utils import _english_wordlist
+        wl = sorted(_english_wordlist())
+        result = _expand_pattern("abou*", wl)
+        assert "about" in result
+        assert all(w.startswith("abou") for w in result)
+
+    def test_expand_suffix_pattern(self):
+        from wallet_utils import _english_wordlist
+        wl = sorted(_english_wordlist())
+        result = _expand_pattern("*don", wl)
+        assert "abandon" in result
+        assert all(w.endswith("don") for w in result)
+
+    def test_expand_prefix_and_suffix_pattern(self):
+        from wallet_utils import _english_wordlist
+        wl = sorted(_english_wordlist())
+        result = _expand_pattern("ab*on", wl)
+        assert "abandon" in result
+        assert all(w.startswith("ab") and w.endswith("on") for w in result)
+
+    def test_expand_no_match_returns_empty(self):
+        from wallet_utils import _english_wordlist
+        wl = sorted(_english_wordlist())
+        result = _expand_pattern("xyzxyz*", wl)
+        assert result == []
+
+    # --- recover_missing_words with partial patterns ---
+
+    def test_prefix_pattern_finds_correct_word(self):
+        # "abou*" should match "about" and recover the valid mnemonic.
+        masked = (
+            "abandon abandon abandon abandon abandon abandon "
+            "abandon abandon abandon abandon abandon abou*"
+        )
+        result = recover_missing_words(masked)
+        assert VALID_MNEMONIC in result["candidates"]
+
+    def test_prefix_pattern_narrows_search_space(self):
+        # "abou*" matches far fewer than 2048 words.
+        masked = (
+            "abandon abandon abandon abandon abandon abandon "
+            "abandon abandon abandon abandon abandon abou*"
+        )
+        result = recover_missing_words(masked)
+        assert result["search_space"] < 2048
+
+    def test_prefix_pattern_with_address_filter(self):
+        masked = (
+            "abandon abandon abandon abandon abandon abandon "
+            "abandon abandon abandon abandon abandon abou*"
+        )
+        result = recover_missing_words(masked, target_address=EXPECTED_ETH_FIRST)
+        assert result["candidates"] == [VALID_MNEMONIC]
+        assert result["with_target"] is True
+
+    def test_suffix_pattern_finds_correct_word(self):
+        masked = (
+            "abandon abandon abandon abandon abandon abandon "
+            "abandon abandon abandon abandon abandon *out"
+        )
+        result = recover_missing_words(masked)
+        assert VALID_MNEMONIC in result["candidates"]
+
+    def test_no_match_pattern_raises_value_error(self):
+        masked = (
+            "abandon abandon abandon abandon abandon abandon "
+            "abandon abandon abandon abandon abandon xyzxyz*"
+        )
+        with pytest.raises(ValueError, match="matches no BIP39 words"):
+            recover_missing_words(masked)
+
+    def test_mixed_question_mark_and_partial_pattern(self):
+        # One "?" plus one prefix pattern — should still recover the mnemonic.
+        words = VALID_MNEMONIC.split()
+        words[5] = "?"
+        words[11] = "abou*"
+        masked = " ".join(words)
+        result = recover_missing_words(masked)
+        assert VALID_MNEMONIC in result["candidates"]
+
+    def test_result_includes_search_space_and_per_position_counts(self):
+        masked = (
+            "abandon abandon abandon abandon abandon abandon "
+            "abandon abandon abandon abandon abandon abou*"
+        )
+        result = recover_missing_words(masked)
+        assert "search_space" in result
+        assert "candidates_per_position" in result
+        assert isinstance(result["search_space"], int)
+        assert isinstance(result["candidates_per_position"], dict)
+
+    def test_result_scrubbed_does_not_leak_mnemonic(self):
+        masked = (
+            "abandon abandon abandon abandon abandon abandon "
+            "abandon abandon abandon abandon abandon abou*"
+        )
+        result = recover_missing_words(masked, target_address=EXPECTED_ETH_FIRST)
+        scrubbed = {k: v for k, v in result.items() if k != "candidates"}
+        flat = repr(scrubbed)
+        assert "about" not in flat
+        assert "abandon" not in flat
 
 
 class TestAutomatedOrderRecoveryRequirements:
