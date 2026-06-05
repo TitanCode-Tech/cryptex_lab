@@ -257,7 +257,56 @@ The `.so` file is a native shared library — it is imported by Python with `imp
 
 ---
 
-## 9. Quick Reference — Developer Commands
+## 9. Building a Windows Client Package
+
+Windows clients need `.pyd` binaries instead of `.so`. You must run the build on a Windows machine (or Windows partition).
+
+### Prerequisites (Windows)
+
+1. **Python 3.10+** — download from https://python.org. During install, tick "Add Python to PATH".
+2. **Visual Studio Build Tools** — download from https://visualstudio.microsoft.com/visual-cpp-build-tools/
+   - Run the installer and select the **"Desktop development with C++"** workload.
+   - This installs the MSVC compiler that Cython needs to produce `.pyd` files.
+3. **Cython** — install inside the project after extracting the developer archive:
+   ```cmd
+   python -m pip install cython
+   ```
+
+### Build steps (Windows)
+
+```cmd
+REM 1. Extract cryptex_lab_developer.zip to a folder, then open Command Prompt there.
+
+REM 2. Install dependencies
+python -m pip install -r requirements.txt
+
+REM 3. Generate keys and manifest
+REM    Lock to a specific client machine:
+python generate_keys.py <client-machine-id>
+REM    Or for a dev/demo license (no machine locking):
+python generate_keys.py --any
+
+REM 4. Compile and package
+python package.py --compiled
+```
+
+Output: `dist\cryptex_lab_client_compiled.zip` — contains `.pyd` binaries. Send this to the Windows client.
+
+### Transferring the developer package from Linux to Windows (dual-boot)
+
+If you are dual-booting:
+
+1. On Linux, run `python package.py` to produce `dist/cryptex_lab_developer.zip`.
+2. Copy the ZIP to a shared location (a FAT32/NTFS partition, USB drive, or shared folder both OSes can access).
+3. Boot into Windows, extract the ZIP, follow the build steps above.
+4. The resulting `dist\cryptex_lab_client_compiled.zip` is Windows-ready.
+
+> **Note:** `generate_keys.py` with no arguments locks the license to whichever machine runs it.
+> On Windows, run it with `--any` for testing, or with the client's machine fingerprint for production.
+
+---
+
+## 10. Quick Reference — Developer Commands
 
 ```bash
 # Full release — compile + package (initial client delivery)
