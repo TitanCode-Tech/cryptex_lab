@@ -38,7 +38,7 @@ import math
 import multiprocessing
 import time
 from collections import Counter
-from itertools import permutations, product
+from itertools import combinations, permutations, product
 from typing import Callable
 
 from bip_utils import Bip39SeedGenerator
@@ -924,3 +924,318 @@ def test_passphrase(
         }
     finally:
         del seed_bytes
+
+
+# ---------------------------------------------------------------------------
+# 5. recover_extra_word
+# ---------------------------------------------------------------------------
+
+def recover_extra_word(
+    mnemonic: str,
+    target_address: str | None = None,
+    progress_callback: Callable[[int, int, int], None] | None = None,
+) -> dict:
+    """
+    Try removing each word one at a time to find a valid BIP39 mnemonic.
+
+    For clients who wrote down one extra word by mistake (N+1 words recorded,
+    one is spurious). Tries every deletion and keeps those that pass checksum.
+
+    Parameters
+    ----------
+    mnemonic       : str  — the over-length mnemonic (e.g. 13 words for a 12-word seed).
+    target_address : str  — optional address filter; if supplied, only candidates
+                           that derive this address are returned.
+    progress_callback : callable(checked, total, found)
+
+    Returns
+    -------
+    dict with keys:
+        candidates   : list[dict]  — {mnemonic, removed_word, position}
+        checked      : int
+        elapsed_time : float
+        with_target  : bool
+    """
+    if not isinstance(mnemonic, str) or not mnemonic.strip():
+        raise ValueError("mnemonic must be a non-empty string")
+
+    words = _split_normalized(mnemonic)
+    n = len(words)
+
+    valid_lengths = {12, 15, 18, 21, 24}
+    target_length = n - 1
+    if target_length not in valid_lengths:
+        raise ValueError(
+            f"Removing one word from {n} words gives {target_length} words, "
+            f"which is not a valid BIP39 length (12/15/18/21/24). "
+            "Provide a mnemonic with exactly one extra word."
+        )
+
+    start_time = time.time()
+    candidates: list[dict] = []
+    checked = 0
+
+    for i in range(n):
+        trial_words = words[:i] + words[i + 1:]
+        candidate = " ".join(trial_words)
+        v = validate_mnemonic(candidate)
+        checked += 1
+        if v["valid"]:
+            if target_address is None or _first_address_matches(candidate, target_address):
+                candidates.append({
+                    "mnemonic": candidate,
+                    "removed_word": words[i],
+                    "position": i + 1,  # 1-based for display
+                })
+
+        if progress_callback:
+            progress_callback(checked, n, len(candidates))
+
+    return {
+        "candidates": candidates,
+        "checked": checked,
+        "elapsed_time": time.time() - start_time,
+        "with_target": target_address is not None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 6. recover_with_typos  (BTCRecover --typos N equivalent for BIP39 seeds)
+# ---------------------------------------------------------------------------
+
+# Cap on total substitution search space for typo recovery.
+_TYPO_SEARCH_CAP = 2_000_000
+
+
+def _word_typo_candidates(
+    word: str, wordlist_set: frozenset[str], soundex_idx: dict
+) -> list[str]:
+    """
+    Return BIP39 word alternatives for a potentially mistyped word, combining:
+      - keyboard-adjacent substitutions (QWERTY, one char)
+      - phonetic matches (Soundex)
+      - edit-distance ≤ 2 against the full wordlist
+    """
+    seen: dict[str, None] = {}
+
+    for w in _keyboard_typos(word, wordlist_set):
+        seen.setdefault(w, None)
+
+    for w in soundex_idx.get(_soundex(word), []):
+        seen.setdefault(w, None)
+
+    for w in wordlist_set:
+        if w not in seen and _levenshtein(word, w) <= 2:
+            seen.setdefault(w, None)
+
+    return list(seen.keys())
+
+
+def _typo_recovery_worker(args: tuple) -> dict:
+    """
+    Multiprocessing worker for recover_with_typos.
+    args: (template_words, typo_positions, position_candidates, target_address)
+    """
+    template_words, typo_positions, position_candidates, target_address = args
+    local_candidates: list[str] = []
+    checked = 0
+    trial = list(template_words)
+
+    for combo in product(*position_candidates):
+        for pos, w in zip(typo_positions, combo):
+            trial[pos] = w
+        checked += 1
+        candidate = " ".join(trial)
+        if validate_mnemonic(candidate)["valid"]:
+            if target_address is None or _first_address_matches(candidate, target_address):
+                local_candidates.append(candidate)
+
+    return {"candidates": local_candidates, "checked": checked}
+
+
+def recover_with_typos(
+    mnemonic: str,
+    max_typo_words: int = 1,
+    target_address: str | None = None,
+    progress_callback: Callable[[int, int, int], None] | None = None,
+) -> dict:
+    """
+    BTCRecover ``--typos N`` equivalent for BIP39 mnemonics.
+
+    For each combination of up to ``max_typo_words`` positions, substitute
+    keyboard-adjacent, phonetically-similar, and edit-distance-≤2 alternatives
+    from the BIP39 wordlist and test the resulting mnemonic's checksum.
+
+    Parameters
+    ----------
+    mnemonic       : str  — the (possibly misspelled) mnemonic to recover.
+    max_typo_words : int  — max simultaneous wrong positions to correct (1 or 2).
+    target_address : str  — optional address filter.
+    progress_callback : callable(checked, total, found)
+
+    Returns
+    -------
+    dict with keys:
+        candidates   : list[str]
+        checked      : int
+        elapsed_time : float
+        with_target  : bool
+        truncated    : bool
+        search_space : int
+    """
+    if not isinstance(mnemonic, str) or not mnemonic.strip():
+        raise ValueError("mnemonic must be a non-empty string")
+    if not isinstance(max_typo_words, int) or max_typo_words < 1:
+        raise ValueError("max_typo_words must be a positive integer")
+    if max_typo_words > 2:
+        raise ValueError("max_typo_words is capped at 2 to keep runtimes manageable")
+
+    words = _split_normalized(mnemonic)
+    wordlist_set = frozenset(_english_wordlist())
+    soundex_idx = _get_soundex_index()
+
+    # Build per-position alternative lists
+    per_position: dict[int, list[str]] = {}
+    for i, w in enumerate(words):
+        alts = _word_typo_candidates(w, wordlist_set, soundex_idx)
+        if alts:
+            per_position[i] = alts
+
+    if not per_position:
+        return {
+            "candidates": [],
+            "checked": 0,
+            "elapsed_time": 0.0,
+            "with_target": target_address is not None,
+            "truncated": False,
+            "search_space": 0,
+        }
+
+    # Build tasks: one task per (position_subset) combination
+    tasks = []
+    total_search_space = 0
+
+    for n_typos in range(1, max_typo_words + 1):
+        for pos_combo in combinations(sorted(per_position.keys()), n_typos):
+            pos_cands = [per_position[p] for p in pos_combo]
+            combo_count = 1
+            for pc in pos_cands:
+                combo_count *= len(pc)
+            total_search_space += combo_count
+            tasks.append((list(pos_combo), pos_cands))
+
+    if total_search_space > _TYPO_SEARCH_CAP:
+        raise ValueError(
+            f"Typo recovery search space ({total_search_space:,}) exceeds the "
+            f"{_TYPO_SEARCH_CAP:,} limit. Use max_typo_words=1 or provide a "
+            "target address to stop early on the first confirmed match."
+        )
+
+    start_time = time.time()
+    local_candidates: list[str] = []
+    checked = 0
+    truncated = False
+    num_workers = max(1, multiprocessing.cpu_count() - 1)
+
+    worker_tasks = [
+        (words, pos_combo, pos_cands, target_address)
+        for pos_combo, pos_cands in tasks
+    ]
+
+    with multiprocessing.Pool(num_workers) as pool:
+        for res in pool.imap_unordered(_typo_recovery_worker, worker_tasks):
+            checked += res["checked"]
+            for cand in res["candidates"]:
+                if cand not in local_candidates:
+                    local_candidates.append(cand)
+                    if len(local_candidates) >= _MAX_RETURNED_CANDIDATES:
+                        truncated = True
+
+            if progress_callback:
+                progress_callback(checked, total_search_space, len(local_candidates))
+
+            if truncated:
+                pool.terminate()
+                break
+
+    return {
+        "candidates": local_candidates,
+        "checked": checked,
+        "elapsed_time": time.time() - start_time,
+        "with_target": target_address is not None,
+        "truncated": truncated,
+        "search_space": total_search_space,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 7. Multi-language BIP39 support
+# ---------------------------------------------------------------------------
+
+_SUPPORTED_LANGUAGES: list[str] = [
+    "english",
+    "chinese_simplified",
+    "chinese_traditional",
+    "french",
+    "italian",
+    "japanese",
+    "korean",
+    "spanish",
+    "czech",
+    "portuguese",
+]
+
+
+def list_bip39_languages() -> list[str]:
+    """Return all BIP39 language codes supported by the mnemonic package."""
+    return list(_SUPPORTED_LANGUAGES)
+
+
+def validate_mnemonic_multilang(mnemonic: str, language: str = "english") -> dict:
+    """
+    Validate a BIP39 mnemonic in the specified language.
+
+    Parameters
+    ----------
+    mnemonic : str  — space-separated mnemonic phrase.
+    language : str  — one of list_bip39_languages().
+
+    Returns
+    -------
+    dict with keys:
+        valid      : bool
+        language   : str
+        word_count : int
+        error      : str | None
+    """
+    if language not in _SUPPORTED_LANGUAGES:
+        raise ValueError(
+            f"Unsupported language '{language}'. "
+            f"Choose from: {', '.join(_SUPPORTED_LANGUAGES)}"
+        )
+
+    words = mnemonic.strip().split()
+    word_count = len(words)
+
+    if language == "english":
+        result = validate_mnemonic(mnemonic)
+        return {
+            "valid": result["valid"],
+            "language": "english",
+            "word_count": word_count,
+            "error": result.get("error"),
+        }
+
+    from mnemonic import Mnemonic
+    m = Mnemonic(language)
+    try:
+        valid = m.check(mnemonic.strip())
+    except Exception as exc:
+        return {"valid": False, "language": language, "word_count": word_count, "error": str(exc)}
+
+    return {
+        "valid": valid,
+        "language": language,
+        "word_count": word_count,
+        "error": None if valid else "Invalid checksum or unrecognised words",
+    }

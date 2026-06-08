@@ -46,10 +46,14 @@ from wallet_utils import (
 )
 from recovery_utils import (
     recover_missing_words,
+    recover_extra_word,
+    recover_with_typos,
     suggest_typo_corrections,
     recover_word_order,
     test_passphrase,
     estimate_recovery_time,
+    list_bip39_languages,
+    validate_mnemonic_multilang,
     MAX_MISSING_WORDS,
     MAX_ORDER_POSITIONS,
     _expand_pattern,
@@ -1799,11 +1803,15 @@ def page_incomplete_seed():
     )
     col1, col2 = st.columns([3, 2])
     with col1:
-        open_box("SEED PHRASE RECONSTRUCTION", live=True)
+        tab_missing, tab_extra = st.tabs(["MISSING WORDS", "EXTRA WORD"])
 
-        with st.expander("PATTERN GUIDE — how to mark unknown / partial words"):
-            st.markdown(
-                """
+        # ── Tab 1: Missing / Partial Word Recovery ─────────────────────────
+        with tab_missing:
+            open_box("SEED PHRASE RECONSTRUCTION", live=True)
+
+            with st.expander("PATTERN GUIDE — how to mark unknown / partial words"):
+                st.markdown(
+                    """
 **Fully unknown word** — use `?`:
 ```
 abandon ? ? abandon abandon abandon abandon abandon abandon abandon abandon about
@@ -1830,168 +1838,278 @@ ab*on ? abandon ...
 
 You may mix `?` and partial patterns freely. The total search space (product of all per-position candidate counts) must stay under **{:,}**.
 """.format(_SEARCH_SPACE_CAP)
-            )
-
-        phrase = st.text_area(
-            "KNOWN WORDS — use '?' for unknown, 'prefix*' or '*suffix' for partial words",
-            value="",
-            key="inc_phrase",
-            height=100,
-        )
-
-        # ── live pattern analysis ──────────────────────────────────────────
-        from wallet_utils import _english_wordlist, _normalize_mnemonic
-        pattern_info: list[dict] = []
-        search_space_estimate = 1
-        has_any_variable = False
-
-        if phrase.strip():
-            try:
-                wl_sorted = sorted(_english_wordlist())
-                raw_words = _normalize_mnemonic(phrase).split()
-                for idx, tok in enumerate(raw_words):
-                    is_var = tok == _REC_UNKNOWN_TOKEN or _WILDCARD in tok
-                    if is_var:
-                        has_any_variable = True
-                        cands = _expand_pattern(tok, wl_sorted)
-                        n = len(cands)
-                        search_space_estimate *= max(n, 1)
-                        examples = ", ".join(cands[:4]) + ("…" if len(cands) > 4 else "")
-                        pattern_info.append({
-                            "pos": idx + 1,
-                            "token": tok,
-                            "matches": n,
-                            "examples": examples if n else "NO MATCH",
-                        })
-            except Exception:
-                pass
-
-        if pattern_info:
-            st.markdown("##### Pattern Analysis")
-            headers = ["POS", "PATTERN", "MATCHING WORDS", "EXAMPLES"]
-            rows = [
-                [
-                    str(p["pos"]),
-                    p["token"],
-                    str(p["matches"]) if p["matches"] else '<span class="cx-tag red">0 — NO MATCH</span>',
-                    p["examples"],
-                ]
-                for p in pattern_info
-            ]
-            render_data_table(headers, rows)
-            space_color = "green" if search_space_estimate <= _SEARCH_SPACE_CAP else "red"
-            render_status_cards([
-                ("VARIABLE POSITIONS", str(len(pattern_info)), "orange"),
-                ("SEARCH SPACE", f"{search_space_estimate:,}", space_color),
-                ("ENGINE", "OFFLINE (MULTIPROCESSING)", "green"),
-                ("LAST CHECKED", str(st.session_state.get("inc_last_checked", 0)), ""),
-            ])
-        else:
-            render_status_cards([
-                ("VARIABLE POSITIONS", "0" if phrase.strip() else "—", ""),
-                ("ENGINE", "OFFLINE (MULTIPROCESSING)", "green"),
-                ("MAX FULL UNKNOWNS (?)", str(MAX_MISSING_WORDS), ""),
-                ("LAST CHECKED", str(st.session_state.get("inc_last_checked", 0)), ""),
-            ])
-
-        st.divider()
-
-        # ── recovery mode (with / without address) ────────────────────────
-        mode = st.radio(
-            "RECOVERY MODE",
-            [
-                "With Known Wallet Address  (results filtered to your address)",
-                "Without Wallet Address  (all checksum-valid candidates returned)",
-            ],
-            key="inc_mode",
-            horizontal=False,
-        )
-        use_address = mode.startswith("With")
-
-        target = ""
-        if use_address:
-            target = st.text_input(
-                "TARGET WALLET ADDRESS",
-                key="inc_target",
-                placeholder="0x...  or  bc1...  or  1...  or  3...",
-            )
-            if not target.strip():
-                st.caption(
-                    "Enter the wallet address to confirm which candidate is correct. "
-                    "Without it the engine returns every checksum-valid phrase."
                 )
-        else:
-            st.caption(
-                "No address filter — every BIP39 checksum-valid candidate is returned. "
-                "Multiple results are normal; all are mathematically valid completions "
-                "of your phrase. Use another tool (e.g. Address Generator) to identify "
-                "the correct one."
+
+            phrase = st.text_area(
+                "KNOWN WORDS — use '?' for unknown, 'prefix*' or '*suffix' for partial words",
+                value="",
+                key="inc_phrase",
+                height=100,
             )
 
-        if _btn("RUN RECOVERY", key="inc_run", variant="orange"):
-            if not phrase.strip() or not has_any_variable:
-                st.warning("Phrase must contain at least one '?' or a partial pattern (e.g. 'aban*') to indicate unknown/partial words.")
-            else:
-                target_arg = target.strip() or None
+            # ── live pattern analysis ──────────────────────────────────────
+            from wallet_utils import _english_wordlist, _normalize_mnemonic
+            pattern_info: list[dict] = []
+            search_space_estimate = 1
+            has_any_variable = False
 
-                log_event("info", f"Starting recovery — {len(pattern_info)} variable position(s) — address filter: {target_arg is not None}")
+            if phrase.strip():
+                try:
+                    wl_sorted = sorted(_english_wordlist())
+                    raw_words = _normalize_mnemonic(phrase).split()
+                    for idx, tok in enumerate(raw_words):
+                        is_var = tok == _REC_UNKNOWN_TOKEN or _WILDCARD in tok
+                        if is_var:
+                            has_any_variable = True
+                            cands = _expand_pattern(tok, wl_sorted)
+                            n = len(cands)
+                            search_space_estimate *= max(n, 1)
+                            examples = ", ".join(cands[:4]) + ("…" if len(cands) > 4 else "")
+                            pattern_info.append({
+                                "pos": idx + 1,
+                                "token": tok,
+                                "matches": n,
+                                "examples": examples if n else "NO MATCH",
+                            })
+                except Exception:
+                    pass
 
-                progress_bar = st.progress(0.0)
-                status_text = st.empty()
-
-                def update_progress(checked, total, found):
-                    pct = min(1.0, float(checked) / total)
-                    progress_bar.progress(pct)
-                    status_text.markdown(
-                        f"**Checked**: {checked:,} / {total:,} ({pct*100:.1f}%) | "
-                        f"**Candidates Found**: {found}"
-                    )
-
-                with st.spinner("Executing candidate search..."):
-                    try:
-                        result = recover_missing_words(
-                            phrase,
-                            target_address=target_arg,
-                            max_unknowns=MAX_MISSING_WORDS,
-                            progress_callback=update_progress,
-                        )
-                    except ValueError as e:
-                        log_event("err", f"Recovery error: {e}")
-                        st.error(str(e))
-                        st.stop()
-
-                st.session_state["inc_last_checked"] = result["checked"]
-                cand = result["candidates"]
-
-                st.markdown("### Recovery Metrics")
+            if pattern_info:
+                st.markdown("##### Pattern Analysis")
+                headers = ["POS", "PATTERN", "MATCHING WORDS", "EXAMPLES"]
+                rows = [
+                    [
+                        str(p["pos"]),
+                        p["token"],
+                        str(p["matches"]) if p["matches"] else '<span class="cx-tag red">0 — NO MATCH</span>',
+                        p["examples"],
+                    ]
+                    for p in pattern_info
+                ]
+                render_data_table(headers, rows)
+                space_color = "green" if search_space_estimate <= _SEARCH_SPACE_CAP else "red"
                 render_status_cards([
-                    ("SEARCH SPACE", f"{result.get('search_space', 0):,}", ""),
-                    ("TOTAL CHECKED", f"{result['checked']:,}", ""),
-                    ("CHECKSUM PASSED", f"{result['checksum_passed']:,}", "green"),
-                    ("SPEED", f"{int(result['checked'] / (result['elapsed_time'] or 0.001)):,} keys/s", ""),
+                    ("VARIABLE POSITIONS", str(len(pattern_info)), "orange"),
+                    ("SEARCH SPACE", f"{search_space_estimate:,}", space_color),
+                    ("ENGINE", "OFFLINE (MULTIPROCESSING)", "green"),
+                    ("LAST CHECKED", str(st.session_state.get("inc_last_checked", 0)), ""),
+                ])
+            else:
+                render_status_cards([
+                    ("VARIABLE POSITIONS", "0" if phrase.strip() else "—", ""),
+                    ("ENGINE", "OFFLINE (MULTIPROCESSING)", "green"),
+                    ("MAX FULL UNKNOWNS (?)", str(MAX_MISSING_WORDS), ""),
+                    ("LAST CHECKED", str(st.session_state.get("inc_last_checked", 0)), ""),
                 ])
 
-                if cand:
-                    log_event("ok", f"Recovered {len(cand)} candidate(s) in {result['elapsed_time']:.2f}s")
-                    mode_label = "address-verified" if target_arg else "checksum-valid"
-                    st.success(f"Found {len(cand)} {mode_label} candidate phrase(s) in {result['elapsed_time']:.2f} seconds.")
-                    st.session_state["recovery_candidates"] = cand
-                    for c in cand[:10]:
-                        st.code(c, language="text")
-                    if result["truncated"]:
-                        st.warning("Result list truncated at 100 candidates.")
-                    if not target_arg and len(cand) > 1:
-                        st.info(
-                            f"{len(cand)} candidates returned (no address filter). "
-                            "Use the Address Generator or Address Matcher to identify the correct phrase."
-                        )
+            st.divider()
+
+            # ── recovery mode (with / without address) ─────────────────────
+            mode = st.radio(
+                "RECOVERY MODE",
+                [
+                    "With Known Wallet Address  (results filtered to your address)",
+                    "Without Wallet Address  (all checksum-valid candidates returned)",
+                ],
+                key="inc_mode",
+                horizontal=False,
+            )
+            use_address = mode.startswith("With")
+
+            target = ""
+            if use_address:
+                target = st.text_input(
+                    "TARGET WALLET ADDRESS",
+                    key="inc_target",
+                    placeholder="0x...  or  bc1...  or  1...  or  3...",
+                )
+                if not target.strip():
+                    st.caption(
+                        "Enter the wallet address to confirm which candidate is correct. "
+                        "Without it the engine returns every checksum-valid phrase."
+                    )
+            else:
+                st.caption(
+                    "No address filter — every BIP39 checksum-valid candidate is returned. "
+                    "Multiple results are normal; all are mathematically valid completions "
+                    "of your phrase. Use another tool (e.g. Address Generator) to identify "
+                    "the correct one."
+                )
+
+            if _btn("RUN RECOVERY", key="inc_run", variant="orange"):
+                if not phrase.strip() or not has_any_variable:
+                    st.warning("Phrase must contain at least one '?' or a partial pattern (e.g. 'aban*') to indicate unknown/partial words.")
                 else:
-                    log_event("warn", "No candidates produced")
-                    if target_arg:
-                        st.error("No candidates matched the target address. Verify the address and try without the address filter to see all checksum-valid options.")
+                    target_arg = target.strip() or None
+
+                    log_event("info", f"Starting recovery — {len(pattern_info)} variable position(s) — address filter: {target_arg is not None}")
+
+                    progress_bar = st.progress(0.0)
+                    status_text = st.empty()
+
+                    def update_progress(checked, total, found):
+                        pct = min(1.0, float(checked) / total)
+                        progress_bar.progress(pct)
+                        status_text.markdown(
+                            f"**Checked**: {checked:,} / {total:,} ({pct*100:.1f}%) | "
+                            f"**Candidates Found**: {found}"
+                        )
+
+                    with st.spinner("Executing candidate search..."):
+                        try:
+                            result = recover_missing_words(
+                                phrase,
+                                target_address=target_arg,
+                                max_unknowns=MAX_MISSING_WORDS,
+                                progress_callback=update_progress,
+                            )
+                        except ValueError as e:
+                            log_event("err", f"Recovery error: {e}")
+                            st.error(str(e))
+                            st.stop()
+
+                    st.session_state["inc_last_checked"] = result["checked"]
+                    cand = result["candidates"]
+
+                    st.markdown("### Recovery Metrics")
+                    render_status_cards([
+                        ("SEARCH SPACE", f"{result.get('search_space', 0):,}", ""),
+                        ("TOTAL CHECKED", f"{result['checked']:,}", ""),
+                        ("CHECKSUM PASSED", f"{result['checksum_passed']:,}", "green"),
+                        ("SPEED", f"{int(result['checked'] / (result['elapsed_time'] or 0.001)):,} keys/s", ""),
+                    ])
+
+                    if cand:
+                        log_event("ok", f"Recovered {len(cand)} candidate(s) in {result['elapsed_time']:.2f}s")
+                        mode_label = "address-verified" if target_arg else "checksum-valid"
+                        st.success(f"Found {len(cand)} {mode_label} candidate phrase(s) in {result['elapsed_time']:.2f} seconds.")
+                        st.session_state["recovery_candidates"] = cand
+                        for c in cand[:10]:
+                            st.code(c, language="text")
+                        if result["truncated"]:
+                            st.warning("Result list truncated at 100 candidates.")
+                        if not target_arg and len(cand) > 1:
+                            st.info(
+                                f"{len(cand)} candidates returned (no address filter). "
+                                "Use the Address Generator or Address Matcher to identify the correct phrase."
+                            )
                     else:
-                        st.error("No checksum-valid candidates produced. Check that your known words are spelled correctly (run Typo Correction Lab).")
-        close_box()
+                        log_event("warn", "No candidates produced")
+                        if target_arg:
+                            st.error("No candidates matched the target address. Verify the address and try without the address filter to see all checksum-valid options.")
+                        else:
+                            st.error("No checksum-valid candidates produced. Check that your known words are spelled correctly (run Typo Correction Lab).")
+            close_box()
+
+        # ── Tab 2: Extra Word Removal ──────────────────────────────────────
+        with tab_extra:
+            open_box("EXTRA WORD REMOVAL", live=True)
+            st.markdown(
+                "Use this tool when the client wrote down **one extra word by mistake** "
+                "(e.g. a 13-word phrase where the real seed is 12 words). "
+                "The engine tries removing each word in turn and keeps results that pass "
+                "the BIP39 checksum — typically just 1–2 candidates."
+            )
+
+            render_status_cards([
+                ("METHOD", "TRY EACH DELETION", "orange"),
+                ("VALID LENGTHS", "12 / 15 / 18 / 21 / 24", ""),
+                ("ENGINE", "OFFLINE", "green"),
+                ("MAX CHECKS", "= number of input words", ""),
+            ])
+
+            st.divider()
+
+            extra_phrase = st.text_area(
+                "MNEMONIC WITH EXTRA WORD",
+                value="",
+                key="extra_phrase",
+                height=100,
+                placeholder="Enter the over-length phrase (e.g. 13 words if the correct seed is 12 words)",
+            )
+
+            extra_mode = st.radio(
+                "RECOVERY MODE",
+                [
+                    "With Known Wallet Address  (results filtered to your address)",
+                    "Without Wallet Address  (all checksum-valid candidates returned)",
+                ],
+                key="extra_mode",
+                horizontal=False,
+            )
+            extra_use_addr = extra_mode.startswith("With")
+
+            extra_target = ""
+            if extra_use_addr:
+                extra_target = st.text_input(
+                    "TARGET WALLET ADDRESS",
+                    key="extra_target",
+                    placeholder="0x...  or  bc1...  or  1...  or  3...",
+                )
+            else:
+                st.caption("All checksum-valid candidates returned — use Address Generator to identify the correct one.")
+
+            if _btn("RUN EXTRA WORD REMOVAL", key="extra_run", variant="orange"):
+                if not extra_phrase.strip():
+                    st.warning("Enter the mnemonic phrase first.")
+                else:
+                    extra_target_arg = extra_target.strip() or None
+                    log_event("info", f"Extra word removal — address filter: {extra_target_arg is not None}")
+
+                    xprog_bar = st.progress(0.0)
+                    xstatus = st.empty()
+
+                    def _xprog(checked, total, found):
+                        pct = min(1.0, float(checked) / max(total, 1))
+                        xprog_bar.progress(pct)
+                        xstatus.markdown(
+                            f"**Checked**: {checked} / {total} | **Candidates**: {found}"
+                        )
+
+                    with st.spinner("Trying each word deletion..."):
+                        try:
+                            xresult = recover_extra_word(
+                                extra_phrase,
+                                target_address=extra_target_arg,
+                                progress_callback=_xprog,
+                            )
+                        except ValueError as exc:
+                            log_event("err", f"Extra word removal error: {exc}")
+                            st.error(str(exc))
+                            st.stop()
+
+                    xcands = xresult["candidates"]
+                    render_status_cards([
+                        ("WORDS TRIED", str(xresult["checked"]), ""),
+                        ("CANDIDATES", str(len(xcands)), "green" if xcands else "red"),
+                        ("TIME", f"{xresult['elapsed_time']:.2f}s", ""),
+                        ("ADDRESS FILTER", "YES" if extra_target_arg else "NO", "green" if extra_target_arg else "orange"),
+                    ])
+
+                    if xcands:
+                        log_event("ok", f"Extra word removal: {len(xcands)} candidate(s)")
+                        mode_label = "address-verified" if extra_target_arg else "checksum-valid"
+                        st.success(f"Found {len(xcands)} {mode_label} candidate(s).")
+                        for xc in xcands:
+                            st.markdown(
+                                f"**Removed word #{xc['position']} — `{xc['removed_word']}`**"
+                            )
+                            st.code(xc["mnemonic"], language="text")
+                            st.markdown("---")
+                        st.session_state["recovery_candidates"] = [xc["mnemonic"] for xc in xcands]
+                    else:
+                        log_event("warn", "Extra word removal: no candidates")
+                        if extra_target_arg:
+                            st.error("No deletion produced a phrase matching the target address.")
+                        else:
+                            st.error(
+                                "No deletion produced a checksum-valid phrase. "
+                                "Verify the input words are spelled correctly "
+                                "(run Typo Correction Lab), or confirm the phrase has "
+                                "exactly one extra word."
+                            )
+            close_box()
+
     with col2:
         render_terminal("recovery :: missing-words")
 
@@ -3741,9 +3859,10 @@ keccak-256(passphrase) → 32-byte private key
 
 
 def page_typo_lab():
-    render_section_header("\U0001F520", "TYPO CORRECTION LAB", "KEYBOARD · PHONETIC · EDIT-DISTANCE")
+    render_section_header("\U0001F520", "TYPO CORRECTION LAB", "KEYBOARD · PHONETIC · EDIT-DISTANCE · AUTO RECOVER")
     col1, col2 = st.columns([3, 2])
     with col1:
+        # ── Section 1: Spell check ─────────────────────────────────────────
         open_box("WORDLIST TYPO ANALYZER", live=True)
         phrase = st.text_area("Phrase to analyze (typos OK)", key="typo_in", height=100)
         max_sugs = st.number_input("SUGGESTIONS PER WORD", 1, 20, value=5, key="typo_max")
@@ -3781,23 +3900,197 @@ def page_typo_lab():
                             st.write(", ".join(u["suggestions"]))
                         st.markdown("---")
         close_box()
+
+        # ── Section 2: Auto Recover ────────────────────────────────────────
+        open_box("AUTO RECOVER — TRY ALL TYPO VARIANTS", live=True)
+        st.markdown(
+            "Automatically try **keyboard, phonetic, and edit-distance alternatives** "
+            "for every word position and report any combination that produces a valid "
+            "BIP39 checksum. This is the equivalent of BTCRecover's `--typos N` flag."
+        )
+        render_status_cards([
+            ("METHOD", "KEYBOARD + PHONETIC + LEVENSHTEIN ≤2", "orange"),
+            ("ENGINE", "OFFLINE (MULTIPROCESSING)", "green"),
+            ("MAX TYPO POSITIONS", "1 or 2 simultaneously", ""),
+            ("SEARCH CAP", "2,000,000 combinations", ""),
+        ])
+        st.divider()
+
+        ar_phrase = st.text_area(
+            "MNEMONIC TO RECOVER (may contain typos)",
+            value="",
+            key="ar_phrase",
+            height=100,
+            placeholder="Enter the seed phrase as written down — typos included",
+        )
+        ar_max_typos = st.radio(
+            "MAX TYPO POSITIONS",
+            [1, 2],
+            key="ar_max_typos",
+            horizontal=True,
+            help="1 = fix one wrong word at a time; 2 = try fixing any two simultaneously (slower)",
+        )
+        ar_mode = st.radio(
+            "RECOVERY MODE",
+            [
+                "With Known Wallet Address  (stop on first address match)",
+                "Without Wallet Address  (all checksum-valid candidates)",
+            ],
+            key="ar_mode",
+            horizontal=False,
+        )
+        ar_use_addr = ar_mode.startswith("With")
+        ar_target = ""
+        if ar_use_addr:
+            ar_target = st.text_input(
+                "TARGET WALLET ADDRESS",
+                key="ar_target",
+                placeholder="0x...  or  bc1...  or  1...  or  3...",
+            )
+        else:
+            st.caption("No address filter — every checksum-valid substitution is returned.")
+
+        if _btn("RUN AUTO RECOVER", key="ar_run", variant="orange"):
+            if not ar_phrase.strip():
+                st.warning("Enter the mnemonic phrase first.")
+            else:
+                ar_target_arg = ar_target.strip() or None
+                log_event("info", f"Typo auto-recover — max_typos={ar_max_typos} address={ar_target_arg is not None}")
+
+                ar_prog = st.progress(0.0)
+                ar_status = st.empty()
+
+                def _ar_prog(checked, total, found):
+                    pct = min(1.0, float(checked) / max(total, 1))
+                    ar_prog.progress(pct)
+                    ar_status.markdown(
+                        f"**Checked**: {checked:,} / {total:,} ({pct*100:.1f}%) | "
+                        f"**Candidates**: {found}"
+                    )
+
+                with st.spinner("Searching typo variants..."):
+                    try:
+                        ar_result = recover_with_typos(
+                            ar_phrase,
+                            max_typo_words=int(ar_max_typos),
+                            target_address=ar_target_arg,
+                            progress_callback=_ar_prog,
+                        )
+                    except ValueError as exc:
+                        log_event("err", f"Auto recover error: {exc}")
+                        st.error(str(exc))
+                        st.stop()
+
+                ar_cands = ar_result["candidates"]
+                render_status_cards([
+                    ("SEARCH SPACE", f"{ar_result['search_space']:,}", ""),
+                    ("CHECKED", f"{ar_result['checked']:,}", ""),
+                    ("CANDIDATES", str(len(ar_cands)), "green" if ar_cands else "red"),
+                    ("TIME", f"{ar_result['elapsed_time']:.2f}s", ""),
+                ])
+
+                if ar_cands:
+                    log_event("ok", f"Auto recover: {len(ar_cands)} candidate(s)")
+                    mode_label = "address-verified" if ar_target_arg else "checksum-valid"
+                    st.success(f"Found {len(ar_cands)} {mode_label} candidate(s).")
+                    st.session_state["recovery_candidates"] = ar_cands
+                    for c in ar_cands[:10]:
+                        st.code(c, language="text")
+                    if ar_result.get("truncated"):
+                        st.warning("Results truncated at 100 candidates.")
+                else:
+                    log_event("warn", "Auto recover: no candidates found")
+                    st.error(
+                        "No checksum-valid variants found. Try max_typos=2, or use "
+                        "Spell Check above to identify the specific misspelled word(s) "
+                        "and correct them manually."
+                    )
+        close_box()
+
     with col2:
         render_terminal("recovery :: typo")
         open_box("MATCHING METHODS")
         st.markdown(
             """
-**⌨️ Keyboard adjacency**
+**Keyboard adjacency**
 Finds BIP39 words reachable by substituting one character with an adjacent QWERTY key. Catches the most common single-finger typos.
 
-**🔊 Phonetic (Soundex)**
+**Phonetic (Soundex)**
 Groups words that sound alike. Catches vowel-swap errors and phonetically similar but differently-spelled words.
 
-**✏️ Edit distance (Levenshtein)**
+**Edit distance (Levenshtein)**
 Counts minimum insertions, deletions, or substitutions. Catches any other spelling mistake.
 
-Results are ranked: keyboard hits first, then phonetic, then edit-distance.
+Results ranked: keyboard first, then phonetic, then edit-distance.
             """
         )
+        close_box()
+
+        open_box("BTCRECOVER CLI GENERATOR")
+        st.markdown(
+            "Generate the equivalent [BTCRecover](https://btcrecover.readthedocs.io) "
+            "command for GPU-accelerated recovery on an online machine."
+        )
+        cli_phrase = st.text_area(
+            "Mnemonic (with typos / ? placeholders)",
+            value="",
+            key="cli_phrase",
+            height=80,
+            placeholder="abandon ? ? abandon abandon abandon ...",
+        )
+        cli_addr = st.text_input("Target BTC/ETH address (optional)", key="cli_addr")
+        cli_typos = st.number_input("--typos N", min_value=0, max_value=3, value=1, key="cli_typos")
+        cli_lang = st.selectbox(
+            "Wordlist language",
+            list_bip39_languages(),
+            key="cli_lang",
+        )
+        cli_coin = st.selectbox("Coin type", ["BTC", "ETH"], key="cli_coin")
+
+        if _btn("GENERATE COMMAND", key="cli_gen", variant=""):
+            if not cli_phrase.strip():
+                st.warning("Enter the mnemonic first.")
+            else:
+                words = cli_phrase.strip().split()
+                has_unknowns = any(w == "?" for w in words)
+
+                lines = ["python btcrecover.py \\"]
+                if cli_coin == "BTC":
+                    lines.append("  --wallet-type bip39 \\")
+                    lines.append("  --bip32-path \"m/84'/0'/0'/0\" \\")
+                    lines.append("  --addr-limit 10 \\")
+                else:
+                    lines.append("  --wallet-type ethereum \\")
+                    lines.append("  --bip32-path \"m/44'/60'/0'/0\" \\")
+                    lines.append("  --addr-limit 10 \\")
+
+                if cli_lang != "english":
+                    lines.append(f"  --language {cli_lang} \\")
+
+                if has_unknowns:
+                    mnemonic_arg = " ".join(words)
+                    lines.append(f"  --mnemonic \"{mnemonic_arg}\" \\")
+                    lines.append("  --mnemonic-wildcards \\")
+                else:
+                    lines.append("  --mnemonic-prompt \\")
+
+                if int(cli_typos) > 0:
+                    lines.append(f"  --typos {int(cli_typos)} \\")
+                    lines.append("  --typos-replace \\")
+                    lines.append("  --typos-swap \\")
+                    lines.append("  --typos-case \\")
+
+                if cli_addr.strip():
+                    lines.append(f"  --addrs \"{cli_addr.strip()}\"")
+                else:
+                    lines.append("  --addrs YOUR_WALLET_ADDRESS")
+
+                cmd = "\n".join(lines)
+                st.code(cmd, language="bash")
+                st.caption(
+                    "Copy this command to a machine with BTCRecover installed. "
+                    "Replace `YOUR_WALLET_ADDRESS` with the client's address if not already set."
+                )
         close_box()
 
 
