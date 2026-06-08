@@ -38,6 +38,131 @@ _MAX_MATCHES = 5
 
 
 # ---------------------------------------------------------------------------
+# BIP38 mutation / typo rules
+# ---------------------------------------------------------------------------
+
+BIP38_MUTATION_RULES: dict[str, str] = {
+    "capitalize":     "Capitalize first letter  (password → Password)",
+    "uppercase":      "ALL CAPS  (password → PASSWORD)",
+    "lowercase":      "lowercase  (Password → password)",
+    "append_numbers": "Append numbers  (…1 / …12 / …123 / …1234)",
+    "append_years":   "Append years  (…2020 / …2021 … …2025)",
+    "append_symbols": "Append symbols  (…! / …@ / …# / …$)",
+    "leet":           "Leet-speak  (a→@ e→3 i→1 o→0 s→$ t→7)",
+    "swap_adjacent":  "Swap adjacent chars  (pasword → tries all 1-swap variants)",
+    "delete_one":     "Delete one char  (pasword = password − 1 char at each position)",
+    "keyboard_close": "Keyboard proximity  (e→w/r, i→o/u, a→s/q)",
+}
+
+_YEAR_SUFFIXES = [str(y) for y in range(2009, 2026)]
+_NUMBER_SUFFIXES = ["1", "12", "123", "1234", "0", "00", "01", "2", "21", "99"]
+_SYMBOL_SUFFIXES = ["!", "@", "#", "$", "_", "-", ".", "?", "*", "&"]
+
+_LEET_TABLE = str.maketrans({
+    "a": "@", "e": "3", "i": "1", "o": "0",
+    "s": "$", "t": "7", "l": "1", "g": "9",
+})
+
+_KEYBOARD_NEIGHBORS: dict[str, str] = {
+    "q": "wa",   "w": "qeasd", "e": "wrsd",  "r": "etdf",  "t": "ryfg",
+    "y": "tugh", "u": "yijh",  "i": "uokj",  "o": "iplk",  "p": "ol",
+    "a": "qwsz", "s": "awedxz", "d": "serfcx", "f": "drtgvc", "g": "ftyhbv",
+    "h": "gyujnb", "j": "huikmn", "k": "jiolm", "l": "kop",
+    "z": "asx",  "x": "zsdc",  "c": "xdfv",  "v": "cfgb",  "b": "vghn",
+    "n": "bhjm", "m": "njk",
+    "1": "2q",   "2": "13wq",  "3": "24ew",  "4": "35re",  "5": "46tr",
+    "6": "57yt", "7": "68uy",  "8": "79ui",  "9": "80io",  "0": "9p",
+}
+
+
+def _mutate_single(base: str, rules: set[str]) -> list[str]:
+    """Return deduplicated variants of one passphrase given the active rules."""
+    seen: dict[str, None] = {base: None}
+
+    def add(v: str) -> None:
+        if v:
+            seen.setdefault(v, None)
+
+    cap = base.capitalize()
+    upper = base.upper()
+    lower = base.lower()
+
+    if "capitalize" in rules:
+        add(cap)
+    if "uppercase" in rules:
+        add(upper)
+    if "lowercase" in rules:
+        add(lower)
+
+    bases_for_suffix = [base]
+    if "capitalize" in rules:
+        bases_for_suffix.append(cap)
+    if "uppercase" in rules:
+        bases_for_suffix.append(upper)
+
+    if "append_numbers" in rules:
+        for sfx in _NUMBER_SUFFIXES:
+            for b in bases_for_suffix:
+                add(b + sfx)
+
+    if "append_years" in rules:
+        for y in _YEAR_SUFFIXES:
+            for b in bases_for_suffix:
+                add(b + y)
+
+    if "append_symbols" in rules:
+        for s in _SYMBOL_SUFFIXES:
+            for b in bases_for_suffix:
+                add(b + s)
+
+    if "leet" in rules:
+        leet = base.lower().translate(_LEET_TABLE)
+        add(leet)
+        add(leet.capitalize())
+
+    if "swap_adjacent" in rules:
+        for i in range(len(base) - 1):
+            add(base[:i] + base[i + 1] + base[i] + base[i + 2:])
+
+    if "delete_one" in rules:
+        for i in range(len(base)):
+            add(base[:i] + base[i + 1:])
+
+    if "keyboard_close" in rules:
+        for i, ch in enumerate(base):
+            for neighbor in _KEYBOARD_NEIGHBORS.get(ch.lower(), ""):
+                add(base[:i] + neighbor + base[i + 1:])
+                if ch.isupper():
+                    add(base[:i] + neighbor.upper() + base[i + 1:])
+
+    return list(seen.keys())
+
+
+def apply_bip38_mutations(candidates: list[str], rules: set[str]) -> list[str]:
+    """
+    Expand a candidate list by applying BIP38 mutation rules.
+
+    Parameters
+    ----------
+    candidates : list[str]
+        Base passphrase candidates.
+    rules : set[str]
+        Keys from BIP38_MUTATION_RULES to apply.
+
+    Returns
+    -------
+    list[str]  — deduplicated expanded list.
+    """
+    if not rules:
+        return candidates
+    seen: dict[str, None] = {}
+    for base in candidates:
+        for variant in _mutate_single(base, rules):
+            seen.setdefault(variant, None)
+    return list(seen.keys())
+
+
+# ---------------------------------------------------------------------------
 # Single-key decryption
 # ---------------------------------------------------------------------------
 

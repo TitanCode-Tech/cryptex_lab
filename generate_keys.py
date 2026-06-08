@@ -2,12 +2,19 @@ import json
 import base64
 import hashlib
 import sys
+import argparse
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from pathlib import Path
 from machine_id import get_machine_fingerprint
+
+TIERS = {
+    "basic": ["recovery", "validator"],
+    "pro":   ["recovery", "forensic", "validator", "derivation", "reports"],
+    "full":  ["recovery", "forensic", "validator", "derivation", "reports", "vault", "advanced"],
+}
 
 CRITICAL_FILES = [
     "app.py",
@@ -41,19 +48,27 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 def main():
+    parser = argparse.ArgumentParser(description="Generate a signed Cryptex Lab license.")
+    fp_group = parser.add_mutually_exclusive_group()
+    fp_group.add_argument("fingerprint", nargs="?", help="Client machine fingerprint (hex string)")
+    fp_group.add_argument("--any", action="store_true", help="Dev/demo license — not machine-locked")
+    parser.add_argument("--client",  default="Authorized User", help="Client name (e.g. 'Acme Forensics LLC')")
+    parser.add_argument("--expires", default="2027-01-01",      help="Expiry date YYYY-MM-DD (default: 2027-01-01)")
+    parser.add_argument("--tier",    default="full", choices=list(TIERS), help="License tier: basic | pro | full")
+    args = parser.parse_args()
+
     # 1. Load or Generate RSA key pair
     private_key_path = Path("private_key.pem")
     if private_key_path.exists():
         print("Loading existing private_key.pem...")
         with open(private_key_path, "rb") as f:
-            private_key = serialization.load_pem_public_key(f.read()) if False else serialization.load_pem_private_key(f.read(), password=None)
+            private_key = serialization.load_pem_private_key(f.read(), password=None)
     else:
         print("Generating RSA key pair...")
         private_key = rsa.generate_private_key(
             public_exponent=65537,
             key_size=2048
         )
-        # Serialize private key
         private_pem = private_key.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
@@ -62,7 +77,7 @@ def main():
         with open("private_key.pem", "wb") as f:
             f.write(private_pem)
         print("Saved private_key.pem (KEEP THIS SECRET!)")
-    
+
     # 2. Serialize public key
     public_key = private_key.public_key()
     public_pem = public_key.public_bytes(
@@ -72,30 +87,31 @@ def main():
     with open("public_key.pem", "wb") as f:
         f.write(public_pem)
     print("Saved public_key.pem")
-    
+
     # 3. Machine fingerprint
-    # Usage:
-    #   python generate_keys.py <fingerprint>   machine-locked license
-    #   python generate_keys.py --any           dev/demo license (no machine locking)
-    #   python generate_keys.py                 locks to THIS machine (dev shortcut)
-    if len(sys.argv) > 1 and sys.argv[1] == "--any":
+    if args.any:
         machine_fp = "any"
         print("Machine fingerprint: any (dev/demo — NOT machine-locked)")
-    elif len(sys.argv) > 1:
-        machine_fp = sys.argv[1].strip()
+    elif args.fingerprint:
+        machine_fp = args.fingerprint.strip()
         print(f"Machine fingerprint: {machine_fp[:16]}... (provided)")
     else:
         machine_fp = get_machine_fingerprint()
         print(f"Machine fingerprint: {machine_fp[:16]}... (this machine)")
+
+    modules = TIERS[args.tier]
+    print(f"Client : {args.client}")
+    print(f"Expires: {args.expires}")
+    print(f"Tier   : {args.tier} → {modules}")
 
     # 4. Create license data
     # TOTP secrets are NOT in the license — the client sets them up via the in-app
     # first-run setup flow. The developer never sees or handles 2FA credentials.
     license_data = {
         "company": "Titan Code",
-        "client": "Authorized User",
-        "expires": "2027-01-01",
-        "modules": ["recovery", "forensic", "validator", "derivation", "reports", "vault", "advanced"],
+        "client": args.client,
+        "expires": args.expires,
+        "modules": modules,
         "machine_fingerprint": machine_fp,
     }
     

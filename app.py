@@ -75,7 +75,16 @@ from passphrase_utils import (
     MUTATION_RULES,
     CANDIDATE_WARN_THRESHOLD,
 )
-from bip38_utils import decrypt_bip38, attack_bip38
+from bip38_utils import decrypt_bip38, attack_bip38, apply_bip38_mutations, BIP38_MUTATION_RULES
+from walletdat_utils import extract_mkey, decrypt_wallet, attack_wallet
+from tokenlist_utils import (
+    generate_tokenlist_candidates,
+    estimate_tokenlist_count,
+    generate_brute_force_candidates,
+    estimate_brute_force_count,
+    BRUTE_FORCE_CHARSETS,
+    MAX_CANDIDATES as _TL_MAX_CANDIDATES,
+)
 from xpub_utils import (
     detect_extended_key_type,
     derive_from_extended_key,
@@ -184,6 +193,7 @@ PAGE_BRAIN_WALLET = "Brain Wallet Recovery"
 PAGE_KEY_IMPORT = "Key Importer"
 PAGE_XPUB = "xpub / xprv Key Tool"
 PAGE_SLIP39 = "SLIP39 Share Recovery"
+PAGE_WALLETDAT = "Bitcoin Core wallet.dat Recovery"
 
 PAGE_LIVE_ADDR = "Live Address Lookup"
 PAGE_LIVE_TX = "Live TX Lookup"
@@ -218,6 +228,7 @@ PAGE_ICONS = {
     PAGE_BIP38: "\U0001F512",
     PAGE_ELECTRUM: "\U000026A1",
     PAGE_BRAIN_WALLET: "\U0001F9E0",
+    PAGE_WALLETDAT: "\U0001F4BE",
     PAGE_LIVE_ADDR: "\U0001F4E1",
     PAGE_LIVE_TX: "\U0001F4E1",
     PAGE_HASH_TOOLS: "\U0001F9EE",
@@ -939,6 +950,7 @@ NAV_GROUPS_OFFLINE = [
         PAGE_BIP38,
         PAGE_ELECTRUM,
         PAGE_BRAIN_WALLET,
+        PAGE_WALLETDAT,
     ]),
     ("FORENSICS", [
         PAGE_BIP39_VALIDATION,
@@ -1334,6 +1346,7 @@ def page_recovery_selector():
         ("BIP38 Paper Wallet", "Decrypt a '6P…' encrypted key or run a dictionary attack against it.", PAGE_BIP38, "orange"),
         ("Electrum Wallet", "Recover Electrum v1/v2 addresses or attack a forgotten v2 passphrase.", PAGE_ELECTRUM, "cyan"),
         ("Brain Wallet", "SHA256/keccak256 passphrase→key derivation + dictionary attack.", PAGE_BRAIN_WALLET, "red"),
+        ("wallet.dat Recovery", "Unlock Bitcoin Core wallet.dat files — wordlist, tokenlist, or brute-force attack.", PAGE_WALLETDAT, "orange"),
     ]
     for i, (title, desc, page, variant) in enumerate(items):
         with grid[i % 2]:
@@ -2642,9 +2655,15 @@ def page_bip38():
             type="password",
             placeholder="Enter the passphrase to test",
         )
+        b38_known_addr = st.text_input(
+            "YOUR KNOWN BTC ADDRESS (optional — confirms this is the correct wallet)",
+            key="b38_known_addr",
+            placeholder="1…  or  3…  — paste the address you expect to see",
+        )
         if _btn("DECRYPT KEY", key="b38_decrypt", variant="cyan"):
             enc = encrypted_key_input.strip()
             pas = passphrase_input.strip()
+            known = b38_known_addr.strip()
             if not enc:
                 st.warning("Enter a BIP38 key.")
                 st.stop()
@@ -2653,17 +2672,42 @@ def page_bip38():
                 st.stop()
             result = decrypt_bip38(enc, pas)
             if result["success"]:
-                log_event("ok", f"BIP38 decrypted → {result['address']}")
-                st.success("Decryption successful!")
-                render_rblock([
-                    ("ADDRESS", result["address"], "rv"),
-                    ("KEY MODE", result["pub_key_mode"], "ra"),
-                    ("STATUS", "PASSPHRASE CORRECT", "rv"),
-                ])
-                st.info(
-                    "The BTC address above is derived from the decrypted private key. "
-                    "Verify this matches your expected address before assuming the passphrase is correct."
-                )
+                derived = result["address"]
+                if known:
+                    wallet_match = derived.lower() == known.lower()
+                    if wallet_match:
+                        log_event("ok", f"BIP38 decrypted → {derived} [WALLET CONFIRMED]")
+                        st.success("Passphrase correct — this IS your wallet.")
+                        render_rblock([
+                            ("WALLET MATCH", "YES — CONFIRMED", "rv"),
+                            ("YOUR ADDRESS", known, "rv"),
+                            ("DERIVED ADDRESS", derived, "rv"),
+                            ("KEY MODE", result["pub_key_mode"], "ra"),
+                        ])
+                    else:
+                        log_event("warn", f"BIP38 decrypted but address mismatch: got {derived}, expected {known}")
+                        st.error("Passphrase is correct, but this is NOT your wallet.")
+                        render_rblock([
+                            ("WALLET MATCH", "NO — WRONG WALLET", "rr"),
+                            ("YOUR ADDRESS", known, "ra"),
+                            ("DERIVED ADDRESS", derived, "ro"),
+                            ("KEY MODE", result["pub_key_mode"], "ra"),
+                        ])
+                        st.warning(
+                            "The passphrase successfully decrypted the key, but the resulting address "
+                            "does not match the address you provided. This BIP38 key belongs to a different wallet."
+                        )
+                else:
+                    log_event("ok", f"BIP38 decrypted → {derived}")
+                    st.success("Decryption successful!")
+                    render_rblock([
+                        ("ADDRESS", derived, "rv"),
+                        ("KEY MODE", result["pub_key_mode"], "ra"),
+                        ("STATUS", "PASSPHRASE CORRECT", "rv"),
+                    ])
+                    st.info(
+                        "Tip: enter your known BTC address above to automatically confirm this is the right wallet."
+                    )
             else:
                 log_event("warn", f"BIP38 decrypt failed: {result['error']}")
                 st.error(f"Decryption failed: {result['error']}")
@@ -2671,91 +2715,298 @@ def page_bip38():
 
         open_box("DICTIONARY ATTACK", live=True)
         st.caption(
-            "Test many passphrases against the BIP38 key. "
-            "Provide a known target address to filter results, or leave blank to report any successful decryption."
+            "Enter your known BTC address so the tool automatically identifies only the passphrase "
+            "that unlocks your wallet. Choose an attack mode below."
         )
-        b38_wl_tab1, b38_wl_tab2 = st.tabs(["PASTE WORDLIST", "UPLOAD FILE"])
-        with b38_wl_tab1:
-            b38_wordlist = st.text_area(
-                "PASTE WORDS / PHRASES (one per line)",
-                key="b38_wordlist",
-                height=120,
-                placeholder="password\nsecret\npaperwallet\n2020\n...",
-            )
-        with b38_wl_tab2:
-            b38_uploaded = st.file_uploader("Upload .txt wordlist", type=["txt"], key="b38_wl_file")
-            if b38_uploaded:
-                b38_wordlist = b38_uploaded.read().decode("utf-8", errors="replace")
-                st.success(f"Loaded {len([l for l in b38_wordlist.splitlines() if l.strip()]):,} lines")
 
         b38_target = st.text_input(
-            "TARGET BTC ADDRESS (optional — filter results)",
+            "YOUR BTC ADDRESS (strongly recommended — confirms the correct wallet)",
             key="b38_target",
-            placeholder="1…  or  3…  (leave blank to report all successful decryptions)",
+            placeholder="1…  or  3…  — paste the address belonging to this BIP38 key",
         )
 
-        st.caption(
-            "BIP38 uses scrypt internally — each candidate takes ~0.1-0.5s. "
-            "Keep wordlists small (< 1,000 candidates) for reasonable runtimes."
-        )
+        # ── Shared result renderer ──────────────────────────────────────────
+        def _render_bip38_results(result: dict, tgt: str) -> None:
+            render_status_cards([
+                ("TESTED",   f"{result['checked']:,}",                                  ""),
+                ("TOTAL",    f"{result['total']:,}",                                     ""),
+                ("ELAPSED",  f"{result['elapsed_time']:.1f}s",                           ""),
+                ("SPEED",    f"{int(result['checked'] / (result['elapsed_time'] or 0.001)):,}/s", ""),
+            ])
+            if result["matches"]:
+                st.balloons()
+                log_event("ok", f"BIP38 attack: {len(result['matches'])} match(es)")
+                for m in result["matches"]:
+                    wallet_confirmed = bool(tgt) and m["address"].lower() == tgt.lower()
+                    if wallet_confirmed:
+                        st.success("Passphrase found — this IS your wallet.")
+                    else:
+                        st.success("Passphrase found!")
+                    render_rblock([
+                        ("WALLET CONFIRMED", "YES" if wallet_confirmed else "NO ADDRESS PROVIDED",
+                         "rv" if wallet_confirmed else "ro"),
+                        ("PASSPHRASE", m["passphrase"], "rv"),
+                        ("BTC ADDRESS", m["address"],   "rv"),
+                        ("KEY MODE",    m["pub_key_mode"], "ra"),
+                    ])
+            else:
+                log_event("warn", "BIP38 attack: no matches")
+                st.error("No passphrase matched. Try a different mode or expand your wordlist.")
 
-        if _btn("RUN DICTIONARY ATTACK", key="b38_attack_run", variant="red", use_container_width=True):
-            enc = st.session_state.get("b38_key", "").strip()
-            wl_text = st.session_state.get("b38_wordlist", "")
-            tgt = st.session_state.get("b38_target", "").strip()
-            if not enc:
-                st.error("Enter a BIP38 key above.")
+        def _run_attack(candidates: list[str], enc: str, tgt: str) -> None:
+            if not candidates:
+                st.error("No candidates generated — check your inputs.")
                 st.stop()
-            if not wl_text.strip():
-                st.error("Wordlist is empty.")
-                st.stop()
-
-            from passphrase_utils import build_candidate_list
-            try:
-                candidates = build_candidate_list(wl_text, set())
-            except Exception as e:
-                st.error(f"Failed to parse wordlist: {e}")
-                st.stop()
-
+            if len(candidates) > 2000:
+                st.warning(
+                    f"{len(candidates):,} candidates × ~0.5s each ≈ "
+                    f"**{len(candidates) * 0.5 / 60:.0f}+ minutes**. Consider reducing the list."
+                )
             log_event("info", f"BIP38 attack: {len(candidates):,} candidates")
-            b38_prog = st.progress(0.0)
+            b38_prog   = st.progress(0.0)
             b38_status = st.empty()
 
-            def _b38_cb(checked, total, found):
+            def _cb(checked: int, total: int, found: int) -> None:
                 pct = min(1.0, checked / total)
                 b38_prog.progress(pct)
                 b38_status.markdown(
-                    f"**Checked**: {checked:,} / {total:,} ({pct*100:.1f}%) | **Matches**: {found}"
+                    f"**Checked**: {checked:,} / {total:,} ({pct*100:.1f}%)  |  **Matches**: {found}"
                 )
 
             with st.spinner("Attacking BIP38 key…"):
                 try:
-                    result = attack_bip38(enc, candidates, target_address=tgt, progress_callback=_b38_cb)
+                    result = attack_bip38(enc, candidates, target_address=tgt, progress_callback=_cb)
                 except ValueError as e:
                     st.error(str(e))
                     st.stop()
+            _render_bip38_results(result, tgt)
 
-            render_status_cards([
-                ("TESTED", f"{result['checked']:,}", ""),
-                ("TOTAL", f"{result['total']:,}", ""),
-                ("ELAPSED", f"{result['elapsed_time']:.1f}s", ""),
-                ("SPEED", f"{int(result['checked'] / (result['elapsed_time'] or 0.001)):,}/s", ""),
-            ])
+        # ── Mutation rule checkboxes (shared helper) ────────────────────────
+        def _mutation_checkboxes(prefix: str) -> set[str]:
+            st.caption("TYPO & MUTATION RULES — applied on top of every candidate")
+            cols = st.columns(2)
+            active: set[str] = set()
+            items = list(BIP38_MUTATION_RULES.items())
+            for idx, (key, label) in enumerate(items):
+                col = cols[idx % 2]
+                if col.checkbox(label, key=f"{prefix}_mut_{key}"):
+                    active.add(key)
+            return active
 
-            if result["matches"]:
-                st.balloons()
-                log_event("ok", f"BIP38 attack: {len(result['matches'])} match(es)")
-                st.success(f"Found {len(result['matches'])} match(es)!")
-                for m in result["matches"]:
-                    st.code(
-                        f"Passphrase : {m['passphrase']}\n"
-                        f"BTC Address: {m['address']}\n"
-                        f"Key Mode   : {m['pub_key_mode']}",
-                        language="text",
+        # ── Attack mode tabs ────────────────────────────────────────────────
+        wl_tab, tl_tab, bf_tab = st.tabs([
+            "WORDLIST",
+            "TOKENLIST (BTCRecover Mode)",
+            "BRUTE FORCE",
+        ])
+
+        # ── Tab 1: WORDLIST ─────────────────────────────────────────────────
+        with wl_tab:
+            st.caption("Paste or upload a wordlist — one passphrase candidate per line.")
+            wl_input_tab1, wl_input_tab2 = st.tabs(["PASTE", "UPLOAD FILE"])
+            with wl_input_tab1:
+                b38_wordlist = st.text_area(
+                    "WORDS / PHRASES (one per line)",
+                    key="b38_wordlist",
+                    height=120,
+                    placeholder="password\nsecret\npaperwallet\n2020\n...",
+                )
+            with wl_input_tab2:
+                b38_uploaded = st.file_uploader(
+                    "Upload .txt wordlist", type=["txt"], key="b38_wl_file"
+                )
+                if b38_uploaded:
+                    b38_wordlist = b38_uploaded.read().decode("utf-8", errors="replace")
+                    st.success(
+                        f"Loaded {len([l for l in b38_wordlist.splitlines() if l.strip()]):,} lines"
                     )
-            else:
-                log_event("warn", "BIP38 attack: no matches")
-                st.error("No passphrase matched. Try a larger wordlist or check the BIP38 key.")
+
+            wl_rules = _mutation_checkboxes("wl")
+
+            if _btn("RUN WORDLIST ATTACK", key="b38_wl_run", variant="red", use_container_width=True):
+                enc = st.session_state.get("b38_key", "").strip()
+                tgt = st.session_state.get("b38_target", "").strip()
+                wl_text = st.session_state.get("b38_wordlist", "")
+                if not enc:
+                    st.error("Enter a BIP38 key at the top of the page.")
+                    st.stop()
+                if not wl_text.strip():
+                    st.error("Wordlist is empty.")
+                    st.stop()
+                raw_lines = [l.strip() for l in wl_text.splitlines() if l.strip()]
+                candidates = apply_bip38_mutations(raw_lines, wl_rules)
+                _run_attack(candidates, enc, tgt)
+
+        # ── Tab 2: TOKENLIST (BTCRecover Mode) ──────────────────────────────
+        with tl_tab:
+            st.caption(
+                "Define password **fragments** you remember. The tool tries every combination "
+                "and ordering. This is the core of the BTCRecover tokenlist approach."
+            )
+            st.markdown(
+                """
+**Format quick-reference:**
+| Syntax | Meaning |
+|---|---|
+| `word1 word2` | Mutually exclusive — picks one per guess |
+| `+ word1 word2` | Required — one of these always appears |
+| `^prefix` | Begin-anchored — always placed first |
+| `suffix$` | End-anchored — always placed last |
+| `%d` `%2d` `%3d` `%4d` | Digit wildcard (0-9, 00-99, 000-999, 0-9999) |
+| `%a` / `%A` | Single lowercase / uppercase letter |
+| `# comment` | Ignored line |
+""",
+                unsafe_allow_html=False,
+            )
+            b38_tokenlist = st.text_area(
+                "TOKENLIST",
+                key="b38_tokenlist",
+                height=160,
+                placeholder=(
+                    "# Example — client remembers fragments 'bitcoin' and a year\n"
+                    "bitcoin Bitcoin BTC\n"
+                    "+ %4d\n"
+                    "! @ #"
+                ),
+            )
+
+            tl_col1, tl_col2, tl_col3 = st.columns(3)
+            with tl_col1:
+                tl_min = st.number_input(
+                    "Min optional tokens", min_value=0, max_value=6, value=1, key="b38_tl_min"
+                )
+            with tl_col2:
+                tl_max = st.number_input(
+                    "Max optional tokens", min_value=1, max_value=6, value=3, key="b38_tl_max"
+                )
+            with tl_col3:
+                tl_sep = st.selectbox(
+                    "Token separator",
+                    options=["(none)", "space", "-", "_", "."],
+                    key="b38_tl_sep",
+                )
+            sep_map = {"(none)": "", "space": " ", "-": "-", "_": "_", ".": "."}
+
+            tl_rules = _mutation_checkboxes("tl")
+
+            tl_est_col, tl_run_col = st.columns([1, 2])
+            with tl_est_col:
+                if _btn("ESTIMATE COUNT", key="b38_tl_estimate", variant="cyan"):
+                    tl_text = st.session_state.get("b38_tokenlist", "")
+                    sep = sep_map.get(st.session_state.get("b38_tl_sep", "(none)"), "")
+                    count = estimate_tokenlist_count(
+                        tl_text,
+                        int(st.session_state.get("b38_tl_min", 1)),
+                        int(st.session_state.get("b38_tl_max", 3)),
+                        sep,
+                    )
+                    if count > _TL_MAX_CANDIDATES:
+                        st.error(
+                            f"~{count:,} candidates (cap is {_TL_MAX_CANDIDATES:,}). "
+                            "Reduce max tokens or narrow your tokenlist."
+                        )
+                    else:
+                        est_mins = count * 0.5 / 60
+                        st.info(f"~{count:,} candidates · est. {est_mins:.1f} min")
+
+            with tl_run_col:
+                if _btn("RUN TOKENLIST ATTACK", key="b38_tl_run", variant="red", use_container_width=True):
+                    enc = st.session_state.get("b38_key", "").strip()
+                    tgt = st.session_state.get("b38_target", "").strip()
+                    tl_text = st.session_state.get("b38_tokenlist", "")
+                    sep = sep_map.get(st.session_state.get("b38_tl_sep", "(none)"), "")
+                    if not enc:
+                        st.error("Enter a BIP38 key at the top of the page.")
+                        st.stop()
+                    if not tl_text.strip():
+                        st.error("Tokenlist is empty.")
+                        st.stop()
+                    base_candidates = generate_tokenlist_candidates(
+                        tl_text,
+                        int(st.session_state.get("b38_tl_min", 1)),
+                        int(st.session_state.get("b38_tl_max", 3)),
+                        sep,
+                    )
+                    candidates = apply_bip38_mutations(base_candidates, tl_rules)
+                    _run_attack(candidates, enc, tgt)
+
+        # ── Tab 3: BRUTE FORCE ───────────────────────────────────────────────
+        with bf_tab:
+            st.warning(
+                "Brute force is only practical for passphrases **≤ 5 characters**. "
+                "BIP38 scrypt makes each guess take ~0.5s. A 4-char lowercase-only search "
+                "= 456,976 candidates ≈ **63 hours** on CPU."
+            )
+            st.caption("Select character sets, length range, and optional fixed prefix/suffix.")
+
+            bf_col1, bf_col2 = st.columns(2)
+            with bf_col1:
+                bf_lower  = st.checkbox("Lowercase letters  (a-z)",  key="b38_bf_lower",  value=True)
+                bf_upper  = st.checkbox("Uppercase letters  (A-Z)",  key="b38_bf_upper")
+                bf_digits = st.checkbox("Digits  (0-9)",              key="b38_bf_digits")
+                bf_syms   = st.checkbox("Symbols  (!@#$…)",           key="b38_bf_syms")
+            with bf_col2:
+                bf_min_len = st.number_input(
+                    "Min length", min_value=1, max_value=8, value=1, key="b38_bf_minlen"
+                )
+                bf_max_len = st.number_input(
+                    "Max length", min_value=1, max_value=8, value=4, key="b38_bf_maxlen"
+                )
+                bf_prefix = st.text_input("Fixed prefix (optional)", key="b38_bf_prefix", value="")
+                bf_suffix = st.text_input("Fixed suffix (optional)", key="b38_bf_suffix", value="")
+
+            bf_est_col, bf_run_col = st.columns([1, 2])
+            with bf_est_col:
+                if _btn("ESTIMATE COUNT", key="b38_bf_estimate", variant="cyan"):
+                    chosen_sets = [
+                        k for k, active in [
+                            ("lowercase", st.session_state.get("b38_bf_lower")),
+                            ("uppercase", st.session_state.get("b38_bf_upper")),
+                            ("digits",    st.session_state.get("b38_bf_digits")),
+                            ("symbols",   st.session_state.get("b38_bf_syms")),
+                        ] if active
+                    ]
+                    count = estimate_brute_force_count(
+                        chosen_sets,
+                        int(st.session_state.get("b38_bf_minlen", 1)),
+                        int(st.session_state.get("b38_bf_maxlen", 4)),
+                    )
+                    est_hrs = count * 0.5 / 3600
+                    if count > _TL_MAX_CANDIDATES:
+                        st.error(
+                            f"~{count:,} candidates · est. **{est_hrs:.1f} hours** on CPU. "
+                            f"Cap is {_TL_MAX_CANDIDATES:,} — reduce length or character sets."
+                        )
+                    else:
+                        st.info(f"~{count:,} candidates · est. {count * 0.5 / 60:.1f} min")
+
+            with bf_run_col:
+                if _btn("RUN BRUTE FORCE", key="b38_bf_run", variant="red", use_container_width=True):
+                    enc = st.session_state.get("b38_key", "").strip()
+                    tgt = st.session_state.get("b38_target", "").strip()
+                    if not enc:
+                        st.error("Enter a BIP38 key at the top of the page.")
+                        st.stop()
+                    chosen_sets = [
+                        k for k, active in [
+                            ("lowercase", st.session_state.get("b38_bf_lower")),
+                            ("uppercase", st.session_state.get("b38_bf_upper")),
+                            ("digits",    st.session_state.get("b38_bf_digits")),
+                            ("symbols",   st.session_state.get("b38_bf_syms")),
+                        ] if active
+                    ]
+                    if not chosen_sets:
+                        st.error("Select at least one character set.")
+                        st.stop()
+                    candidates = generate_brute_force_candidates(
+                        chosen_sets,
+                        int(st.session_state.get("b38_bf_minlen", 1)),
+                        int(st.session_state.get("b38_bf_maxlen", 4)),
+                        st.session_state.get("b38_bf_prefix", ""),
+                        st.session_state.get("b38_bf_suffix", ""),
+                    )
+                    _run_attack(candidates, enc, tgt)
+
         close_box()
 
     with col2:
@@ -2764,16 +3015,404 @@ def page_bip38():
         st.markdown(
             """
 BIP38 encrypts a Bitcoin private key with a passphrase using **scrypt** key derivation.
-
 The encrypted key starts with `6P` and is ~51 characters long.
 
-**Two modes:**
-- **No-EC mode** — standard paper wallet encryption. Most common.
-- **EC-multiply mode** — used by vanity address generators (also `6P…`).
+**Encryption modes** (both auto-detected):
+- **No-EC** — standard paper wallet. Most common.
+- **EC-multiply** — vanity address generators.
 
-Both modes are automatically detected and tried.
+**Scrypt cost**: ~0.5–2s per candidate on CPU. This is intentional — it makes brute-force very slow.
 
-**Scrypt cost**: ~0.1-0.5 seconds per candidate on modern hardware. This is intentional — it makes brute-force very slow. A 1,000-word dictionary takes 1-8 minutes.
+---
+
+**Attack modes in this tool:**
+
+**Wordlist** — paste or upload a list of passphrase candidates. Add typo/mutation rules to automatically expand each word into variants (case, leet, number suffixes, etc.).
+
+**Tokenlist (BTCRecover Mode)** — define password *fragments* you remember. The tool combines and permutes them like BTCRecover's tokenlist engine:
+- Space-separated tokens on one line = mutually exclusive alternatives
+- `+` prefix = required in every guess
+- `^token` / `token$` = begin / end anchors
+- `%d`, `%2d`, `%3d` = digit wildcards
+
+**Brute Force** — exhaustive character-set search. Only practical for passphrases ≤ 5 characters due to scrypt's cost. Use as a last resort.
+
+---
+
+**Speed reference (CPU):**
+| Candidates | Est. time |
+|---|---|
+| 100 | ~1 min |
+| 500 | ~4 min |
+| 1,000 | ~8 min |
+| 5,000 | ~40 min |
+
+GPU acceleration would be ~100× faster but is not available in offline mode.
+            """
+        )
+        close_box()
+
+
+# ---------------------------------------------------------------------------
+# Bitcoin Core wallet.dat Recovery
+# ---------------------------------------------------------------------------
+
+def page_walletdat():
+    render_section_header("\U0001F4BE", "BITCOIN CORE WALLET.DAT RECOVERY", "AES-256-CBC · SHA-512 STRETCHING · PKCS7 VERIFICATION")
+
+    # ── Shared attack runner ─────────────────────────────────────────────────
+    def _run_walletdat_attack(candidates: list[str], mkey: dict) -> None:
+        if not candidates:
+            st.error("No candidates generated — check your inputs.")
+            st.stop()
+        speed_est = int(len(candidates) / max(0.001, len(candidates) * 0.005))
+        elapsed_est = len(candidates) / max(1, speed_est)
+        if len(candidates) > 5000:
+            st.warning(
+                f"{len(candidates):,} candidates · est. **{elapsed_est / 60:.1f} min** "
+                f"at ~{speed_est:,} passwords/sec."
+            )
+        log_event("info", f"wallet.dat attack: {len(candidates):,} candidates")
+        prog   = st.progress(0.0)
+        status = st.empty()
+
+        def _cb(checked: int, total: int, found: int) -> None:
+            pct = min(1.0, checked / total)
+            prog.progress(pct)
+            status.markdown(
+                f"**Checked**: {checked:,} / {total:,} ({pct*100:.1f}%)  |  **Found**: {found}"
+            )
+
+        with st.spinner("Attacking wallet.dat…"):
+            try:
+                result = attack_wallet(mkey, candidates, progress_callback=_cb)
+            except ValueError as e:
+                st.error(str(e))
+                st.stop()
+
+        render_status_cards([
+            ("TESTED",   f"{result['checked']:,}",                                          ""),
+            ("TOTAL",    f"{result['total']:,}",                                             ""),
+            ("ELAPSED",  f"{result['elapsed_time']:.1f}s",                                  ""),
+            ("SPEED",    f"{int(result['checked'] / (result['elapsed_time'] or 0.001)):,}/s", ""),
+        ])
+
+        if result["matches"]:
+            st.balloons()
+            log_event("ok", f"wallet.dat: {len(result['matches'])} password(s) found")
+            for pw in result["matches"]:
+                st.success("Wallet unlocked!")
+                render_rblock([
+                    ("WALLET UNLOCKED", "YES",             "rv"),
+                    ("PASSWORD",        pw,                "rv"),
+                    ("ITERATIONS",      f"{mkey['n_iterations']:,}", "ra"),
+                    ("SALT (hex)",      mkey['salt'].hex(), "ra"),
+                ])
+        else:
+            log_event("warn", "wallet.dat: no password matched")
+            st.error("No password matched. Try a larger wordlist or different approach.")
+
+    # ── Mutation checkboxes (shared helper) ─────────────────────────────────
+    def _mutation_checkboxes_wd(prefix: str) -> set[str]:
+        st.caption("TYPO & MUTATION RULES — applied to every candidate")
+        cols = st.columns(2)
+        active: set[str] = set()
+        for idx, (key, label) in enumerate(BIP38_MUTATION_RULES.items()):
+            if cols[idx % 2].checkbox(label, key=f"{prefix}_wdmut_{key}"):
+                active.add(key)
+        return active
+
+    col1, col2 = st.columns([3, 2])
+
+    with col1:
+        # ── File upload ───────────────────────────────────────────────────
+        open_box("WALLET FILE", live=True)
+        uploaded = st.file_uploader(
+            "Upload wallet.dat",
+            type=["dat"],
+            key="wd_file",
+            help="Bitcoin Core wallet database file (usually in ~/.bitcoin/wallet.dat)",
+        )
+
+        if "wd_mkey" not in st.session_state:
+            st.session_state["wd_mkey"] = None
+        if "wd_info" not in st.session_state:
+            st.session_state["wd_info"] = None
+
+        if uploaded:
+            wallet_bytes = uploaded.read()
+            info = extract_mkey(wallet_bytes)
+            if not info["valid"]:
+                st.error(f"Parse error: {info['error']}")
+            else:
+                st.session_state["wd_info"] = info
+                if info["mkey"]:
+                    st.session_state["wd_mkey"] = info["mkey"]
+                    mkey = info["mkey"]
+                    method_label = (
+                        "SHA-512 stretching (standard)"
+                        if mkey["deriv_method"] == 0 else
+                        "scrypt"
+                    )
+                    st.success("wallet.dat parsed — encryption key record found.")
+                    render_rblock([
+                        ("FILE",        uploaded.name,                     "ra"),
+                        ("SIZE",        f"{len(wallet_bytes):,} bytes",    "ra"),
+                        ("RECORDS",     f"{info['n_pairs']:,}",            "ra"),
+                        ("METHOD",      method_label,                       "rv"),
+                        ("ITERATIONS",  f"{mkey['n_iterations']:,}",       "rv"),
+                        ("SALT (hex)",  mkey['salt'].hex(),                 "ra"),
+                    ])
+                    est_speed = 150
+                    st.caption(
+                        f"Est. attack speed: ~{est_speed} passwords/sec on this CPU. "
+                        f"1,000 candidates ≈ {1000 // est_speed}s · "
+                        f"10,000 candidates ≈ {10000 // est_speed}s."
+                    )
+                else:
+                    st.session_state["wd_mkey"] = None
+                    st.info(
+                        f"wallet.dat parsed ({info['n_pairs']:,} records). "
+                        "No encryption record found — this wallet may not be password-protected."
+                    )
+        elif st.session_state["wd_info"]:
+            st.info("Wallet loaded from earlier in this session. Re-upload to use a different file.")
+        else:
+            st.info("Upload a wallet.dat file to begin.")
+        close_box()
+
+        # ── Single password test ──────────────────────────────────────────
+        open_box("SINGLE PASSWORD TEST", live=True)
+        wd_pass = st.text_input(
+            "PASSWORD TO TEST",
+            key="wd_single_pass",
+            type="password",
+            placeholder="Enter the password you want to try",
+        )
+        if _btn("TEST PASSWORD", key="wd_single_run", variant="cyan"):
+            mkey = st.session_state.get("wd_mkey")
+            if not mkey:
+                st.error("Upload and parse a wallet.dat file first.")
+                st.stop()
+            pw = st.session_state.get("wd_single_pass", "").strip()
+            if not pw:
+                st.warning("Enter a password.")
+                st.stop()
+            result = decrypt_wallet(mkey, pw)
+            if result["success"]:
+                log_event("ok", "wallet.dat single test: password correct")
+                st.success("Password correct — wallet unlocked!")
+                render_rblock([
+                    ("WALLET UNLOCKED", "YES",                        "rv"),
+                    ("PASSWORD",        pw,                           "rv"),
+                    ("ITERATIONS",      f"{mkey['n_iterations']:,}", "ra"),
+                ])
+            else:
+                log_event("warn", "wallet.dat single test: wrong password")
+                st.error("Wrong password.")
+        close_box()
+
+        # ── Attack modes ──────────────────────────────────────────────────
+        open_box("PASSWORD ATTACK", live=True)
+        st.caption(
+            "Three attack modes below. Wallet must be uploaded above before running. "
+            "SHA-512 stretching makes this ~100× faster than BIP38."
+        )
+
+        wl_tab, tl_tab, bf_tab = st.tabs([
+            "WORDLIST",
+            "TOKENLIST (BTCRecover Mode)",
+            "BRUTE FORCE",
+        ])
+
+        # ── Tab 1: WORDLIST ───────────────────────────────────────────────
+        with wl_tab:
+            st.caption("Paste or upload a wordlist — one password candidate per line.")
+            wl_t1, wl_t2 = st.tabs(["PASTE", "UPLOAD FILE"])
+            with wl_t1:
+                wd_wordlist = st.text_area(
+                    "WORDS / PHRASES (one per line)",
+                    key="wd_wordlist",
+                    height=120,
+                    placeholder="password\nsecret\nbitcoin2020\nWallet123\n...",
+                )
+            with wl_t2:
+                wd_uploaded = st.file_uploader(
+                    "Upload .txt wordlist", type=["txt"], key="wd_wl_file"
+                )
+                if wd_uploaded:
+                    wd_wordlist = wd_uploaded.read().decode("utf-8", errors="replace")
+                    st.success(
+                        f"Loaded {len([l for l in wd_wordlist.splitlines() if l.strip()]):,} lines"
+                    )
+
+            wl_rules = _mutation_checkboxes_wd("wd_wl")
+
+            if _btn("RUN WORDLIST ATTACK", key="wd_wl_run", variant="red", use_container_width=True):
+                mkey = st.session_state.get("wd_mkey")
+                if not mkey:
+                    st.error("Upload a wallet.dat file first.")
+                    st.stop()
+                wl_text = st.session_state.get("wd_wordlist", "")
+                if not wl_text.strip():
+                    st.error("Wordlist is empty.")
+                    st.stop()
+                raw = [l.strip() for l in wl_text.splitlines() if l.strip()]
+                candidates = apply_bip38_mutations(raw, wl_rules)
+                _run_walletdat_attack(candidates, mkey)
+
+        # ── Tab 2: TOKENLIST ──────────────────────────────────────────────
+        with tl_tab:
+            st.caption(
+                "Define password **fragments** you remember and let the tool combine them. "
+                "Same BTCRecover tokenlist format as the BIP38 page."
+            )
+            st.markdown(
+                "| Syntax | Meaning |\n|---|---|\n"
+                "| `word1 word2` | Mutually exclusive |\n"
+                "| `+ word1 word2` | Required in every guess |\n"
+                "| `^prefix` | Always first |\n"
+                "| `suffix$` | Always last |\n"
+                "| `%d` `%2d` `%3d` `%4d` | Digit wildcards |\n"
+                "| `%a` / `%A` | Lowercase / uppercase letter |"
+            )
+            wd_tokenlist = st.text_area(
+                "TOKENLIST",
+                key="wd_tokenlist",
+                height=140,
+                placeholder="# Example\nbitcoin Bitcoin\n+ 2020 2021 2022\n! @",
+            )
+            tl_c1, tl_c2, tl_c3 = st.columns(3)
+            with tl_c1:
+                wd_tl_min = st.number_input("Min optional tokens", 0, 6, 1, key="wd_tl_min")
+            with tl_c2:
+                wd_tl_max = st.number_input("Max optional tokens", 1, 6, 3, key="wd_tl_max")
+            with tl_c3:
+                wd_tl_sep = st.selectbox("Token separator", ["(none)", "space", "-", "_", "."], key="wd_tl_sep")
+            sep_map = {"(none)": "", "space": " ", "-": "-", "_": "_", ".": "."}
+
+            tl_rules = _mutation_checkboxes_wd("wd_tl")
+
+            est_c, run_c = st.columns([1, 2])
+            with est_c:
+                if _btn("ESTIMATE", key="wd_tl_est", variant="cyan"):
+                    sep = sep_map.get(st.session_state.get("wd_tl_sep", "(none)"), "")
+                    count = estimate_tokenlist_count(
+                        st.session_state.get("wd_tokenlist", ""),
+                        int(st.session_state.get("wd_tl_min", 1)),
+                        int(st.session_state.get("wd_tl_max", 3)),
+                        sep,
+                    )
+                    st.info(f"~{count:,} candidates · est. {count / 150 / 60:.1f} min")
+            with run_c:
+                if _btn("RUN TOKENLIST ATTACK", key="wd_tl_run", variant="red", use_container_width=True):
+                    mkey = st.session_state.get("wd_mkey")
+                    if not mkey:
+                        st.error("Upload a wallet.dat file first.")
+                        st.stop()
+                    tl_text = st.session_state.get("wd_tokenlist", "")
+                    if not tl_text.strip():
+                        st.error("Tokenlist is empty.")
+                        st.stop()
+                    sep = sep_map.get(st.session_state.get("wd_tl_sep", "(none)"), "")
+                    base = generate_tokenlist_candidates(
+                        tl_text,
+                        int(st.session_state.get("wd_tl_min", 1)),
+                        int(st.session_state.get("wd_tl_max", 3)),
+                        sep,
+                    )
+                    candidates = apply_bip38_mutations(base, tl_rules)
+                    _run_walletdat_attack(candidates, mkey)
+
+        # ── Tab 3: BRUTE FORCE ────────────────────────────────────────────
+        with bf_tab:
+            st.warning(
+                "SHA-512 stretching slows brute force considerably. "
+                "Practical limit: **≤ 6 characters** without weeks of runtime."
+            )
+            bf_c1, bf_c2 = st.columns(2)
+            with bf_c1:
+                bf_lower  = st.checkbox("Lowercase  (a-z)",  key="wd_bf_lower",  value=True)
+                bf_upper  = st.checkbox("Uppercase  (A-Z)",  key="wd_bf_upper")
+                bf_digits = st.checkbox("Digits  (0-9)",      key="wd_bf_digits")
+                bf_syms   = st.checkbox("Symbols  (!@#$…)",   key="wd_bf_syms")
+            with bf_c2:
+                bf_min = st.number_input("Min length", 1, 8, 1, key="wd_bf_min")
+                bf_max = st.number_input("Max length", 1, 8, 4, key="wd_bf_max")
+                bf_pfx = st.text_input("Fixed prefix", key="wd_bf_pfx", value="")
+                bf_sfx = st.text_input("Fixed suffix", key="wd_bf_sfx", value="")
+
+            est_bc, run_bc = st.columns([1, 2])
+            with est_bc:
+                if _btn("ESTIMATE", key="wd_bf_est", variant="cyan"):
+                    chosen = [k for k, a in [
+                        ("lowercase", st.session_state.get("wd_bf_lower")),
+                        ("uppercase", st.session_state.get("wd_bf_upper")),
+                        ("digits",    st.session_state.get("wd_bf_digits")),
+                        ("symbols",   st.session_state.get("wd_bf_syms")),
+                    ] if a]
+                    count = estimate_brute_force_count(
+                        chosen,
+                        int(st.session_state.get("wd_bf_min", 1)),
+                        int(st.session_state.get("wd_bf_max", 4)),
+                    )
+                    st.info(f"~{count:,} · est. {count / 150 / 60:.1f} min")
+            with run_bc:
+                if _btn("RUN BRUTE FORCE", key="wd_bf_run", variant="red", use_container_width=True):
+                    mkey = st.session_state.get("wd_mkey")
+                    if not mkey:
+                        st.error("Upload a wallet.dat file first.")
+                        st.stop()
+                    chosen = [k for k, a in [
+                        ("lowercase", st.session_state.get("wd_bf_lower")),
+                        ("uppercase", st.session_state.get("wd_bf_upper")),
+                        ("digits",    st.session_state.get("wd_bf_digits")),
+                        ("symbols",   st.session_state.get("wd_bf_syms")),
+                    ] if a]
+                    if not chosen:
+                        st.error("Select at least one character set.")
+                        st.stop()
+                    candidates = generate_brute_force_candidates(
+                        chosen,
+                        int(st.session_state.get("wd_bf_min", 1)),
+                        int(st.session_state.get("wd_bf_max", 4)),
+                        st.session_state.get("wd_bf_pfx", ""),
+                        st.session_state.get("wd_bf_sfx", ""),
+                    )
+                    _run_walletdat_attack(candidates, mkey)
+
+        close_box()
+
+    with col2:
+        render_terminal("recovery :: wallet.dat")
+        open_box("ABOUT wallet.dat")
+        st.markdown(
+            """
+Bitcoin Core stores its keys in **wallet.dat**, a Berkeley DB Btree file.
+
+**Encryption (when password-protected):**
+- Master key: 32 random bytes, encrypted with AES-256-CBC
+- Key derivation: OpenSSL EVP_BytesToKey — SHA-512 hashed **N times** (default ~25,000)
+- IV: derived alongside the key in the same SHA-512 chain
+- Newer wallets (method 1): scrypt instead of SHA-512
+
+**Verification method:**
+This tool decrypts the 48-byte master key ciphertext and checks PKCS7 padding.
+A valid padding (last 16 bytes = `0x10`) means the password is correct.
+False-positive chance: ~10⁻³⁸.
+
+**Speed comparison:**
+| Method | Speed (CPU) |
+|---|---|
+| wallet.dat (SHA-512 × 25k) | ~150 /sec |
+| BIP38 (scrypt) | ~2 /sec |
+| BIP39 passphrase | ~200 /sec |
+
+**What you need:**
+- The `wallet.dat` file (from `~/.bitcoin/` on the client's machine)
+- Some knowledge of the password (for guided attacks)
+
+**Supported wallets:** Bitcoin Core, Bitcoin-Qt, any wallet using the same BDB+AES format.
             """
         )
         close_box()
@@ -4198,6 +4837,7 @@ ROUTE = {
     PAGE_BIP38: page_bip38,
     PAGE_ELECTRUM: page_electrum,
     PAGE_BRAIN_WALLET: page_brain_wallet,
+    PAGE_WALLETDAT: page_walletdat,
     PAGE_DERIVATION: page_derivation,
     PAGE_ADDRESS_MATCHER: page_address_matcher,
     PAGE_ADDRESS_GEN: page_address_gen,
@@ -4217,7 +4857,7 @@ OFFLINE_LOCKED_PAGES = {
     PAGE_PASSPHRASE, PAGE_PASSPHRASE_ATTACK, PAGE_DERIVATION, PAGE_ADDRESS_MATCHER,
     PAGE_ADDRESS_GEN, PAGE_BIP39_VALIDATION, PAGE_VAULT_INSPECT,
     PAGE_KEY_IMPORT, PAGE_XPUB, PAGE_SLIP39, PAGE_BIP38, PAGE_ELECTRUM, PAGE_BRAIN_WALLET,
-    PAGE_RECOVERY_SELECTOR,
+    PAGE_WALLETDAT, PAGE_RECOVERY_SELECTOR,
 }
 LIVE_LOCKED_PAGES = {PAGE_LIVE_ADDR, PAGE_LIVE_TX}
 
@@ -4240,6 +4880,7 @@ ROLES = {
         PAGE_RECOVERY_SELECTOR, PAGE_BIP39_VALIDATION, PAGE_INCOMPLETE_SEED, PAGE_TYPO_LAB, PAGE_WRONG_ORDER,
         PAGE_PASSPHRASE, PAGE_PASSPHRASE_ATTACK, PAGE_DERIVATION, PAGE_ADDRESS_MATCHER, PAGE_ADDRESS_GEN,
         PAGE_BIP38, PAGE_ELECTRUM, PAGE_BRAIN_WALLET, PAGE_KEY_IMPORT, PAGE_XPUB, PAGE_SLIP39,
+        PAGE_WALLETDAT,
         PAGE_ENTROPY, PAGE_HASH_TOOLS, PAGE_VAULT_INSPECT, PAGE_AIRGAP_GUIDE, PAGE_EDUCATION,
         PAGE_WIPE, PAGE_EXPORTER, PAGE_LIVE_ADDR, PAGE_LIVE_TX
     ],
@@ -4248,6 +4889,7 @@ ROLES = {
         PAGE_RECOVERY_SELECTOR, PAGE_BIP39_VALIDATION, PAGE_INCOMPLETE_SEED, PAGE_TYPO_LAB, PAGE_WRONG_ORDER,
         PAGE_PASSPHRASE, PAGE_PASSPHRASE_ATTACK, PAGE_DERIVATION, PAGE_ADDRESS_MATCHER, PAGE_ADDRESS_GEN,
         PAGE_BIP38, PAGE_ELECTRUM, PAGE_BRAIN_WALLET, PAGE_KEY_IMPORT, PAGE_XPUB, PAGE_SLIP39,
+        PAGE_WALLETDAT,
         PAGE_ENTROPY, PAGE_HASH_TOOLS, PAGE_VAULT_INSPECT, PAGE_AIRGAP_GUIDE, PAGE_EDUCATION,
         PAGE_WIPE, PAGE_EXPORTER, PAGE_LIVE_ADDR, PAGE_LIVE_TX
     ]
@@ -4354,6 +4996,7 @@ PAGE_MODULE_MAP = {
     PAGE_BIP38: "recovery",
     PAGE_ELECTRUM: "recovery",
     PAGE_BRAIN_WALLET: "recovery",
+    PAGE_WALLETDAT: "recovery",
     PAGE_VAULT_INSPECT: "forensic",
     PAGE_CASE_MGMT: "forensic",
     PAGE_EVIDENCE_HASH: "forensic",
