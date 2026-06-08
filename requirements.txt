@@ -39,3 +39,9 @@ cython==3.2.5
 setuptools>=68.0
 
 shamir-mnemonic>=0.3.0
+
+# BTCRecover engine — required by the bundled btcrecover/ directory.
+# coincurve is a C extension; on Linux/macOS pip builds it from source
+# (needs libsecp256k1). On Windows, use the pre-built wheel from offline_wheels/.
+coincurve>=20.0.0,<22
+protobuf>=5.0.0

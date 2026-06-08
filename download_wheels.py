@@ -53,6 +53,7 @@ def main(argv: list[str] | None = None) -> int:
 
     dest = Path(args.dest)
     req = ROOT / "requirements.txt"
+    btcr_req = ROOT / "btcrecover" / "requirements.txt"
 
     if not req.exists():
         raise SystemExit(f"requirements.txt not found at {req}")
@@ -68,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
 
     dest.mkdir(parents=True, exist_ok=True)
 
-    step(f"Downloading wheels to {dest}/")
+    step(f"Downloading Cryptex Lab wheels to {dest}/")
     cmd = [
         sys.executable, "-m", "pip", "download",
         "-r", str(req),
@@ -77,6 +78,20 @@ def main(argv: list[str] | None = None) -> int:
     result = subprocess.run(cmd)
     if result.returncode != 0:
         raise SystemExit("pip download failed. Check your internet connection and try again.")
+
+    if btcr_req.exists():
+        step(f"Downloading BTCRecover wheels to {dest}/")
+        cmd = [
+            sys.executable, "-m", "pip", "download",
+            "-r", str(btcr_req),
+            "-d", str(dest),
+        ]
+        result = subprocess.run(cmd)
+        if result.returncode != 0:
+            warn("BTCRecover wheel download failed — continuing without it.")
+            warn("BTCRecover features will not be available offline.")
+    else:
+        warn(f"BTCRecover requirements not found at {btcr_req} — skipping.")
 
     wheels = list(dest.glob("*.whl")) + list(dest.glob("*.tar.gz"))
     step(f"Done — {len(wheels)} packages saved to {dest}/")

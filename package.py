@@ -54,6 +54,9 @@ PLAIN_MODULES = [
     "hash_utils.py",
     "export_utils.py",
     "launcher.py",
+    "btcrecover_utils.py",
+    "tokenlist_utils.py",
+    "walletdat_utils.py",
 ]
 
 CLIENT_SUPPORT_FILES = [
@@ -77,7 +80,7 @@ CLIENT_SUPPORT_FILES = [
     "dist/CRYPTEX_LAB_Client_Guide.pdf",
 ]
 
-CLIENT_DIRS = ["assets", ".streamlit"]
+CLIENT_DIRS = ["assets", ".streamlit", "btcrecover"]
 
 DEVELOPER_ONLY_FILES = [
     "private_key.pem",

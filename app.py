@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import html as _html
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -61,6 +62,7 @@ from recovery_utils import (
     _UNKNOWN_TOKEN as _REC_UNKNOWN_TOKEN,
     _SEARCH_SPACE_CAP,
 )
+import btcrecover_utils as _btcr
 from derivation_utils import (
     find_address_match,
     compare_all_standards,
@@ -1803,7 +1805,7 @@ def page_incomplete_seed():
     )
     col1, col2 = st.columns([3, 2])
     with col1:
-        tab_missing, tab_extra = st.tabs(["MISSING WORDS", "EXTRA WORD"])
+        tab_missing, tab_extra, tab_btcr = st.tabs(["MISSING WORDS", "EXTRA WORD", "BTCRECOVER ENGINE"])
 
         # ── Tab 1: Missing / Partial Word Recovery ─────────────────────────
         with tab_missing:
@@ -2108,6 +2110,117 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                                 "(run Typo Correction Lab), or confirm the phrase has "
                                 "exactly one extra word."
                             )
+            close_box()
+
+        # ── Tab 3: BTCRecover Engine ───────────────────────────────────────
+        with tab_btcr:
+            open_box("BTCRECOVER ENGINE — SEED RECOVERY", live=True)
+
+            if not _btcr.is_available():
+                st.error(
+                    f"BTCRecover not found at `{_btcr.BTCRECOVER_DIR}`. "
+                    "Download it from https://github.com/3rdIteration/btcrecover and update "
+                    "`BTCRECOVER_DIR` in `btcrecover_utils.py`."
+                )
+            else:
+                st.markdown(
+                    "Use BTCRecover's native engine for advanced seed recovery — "
+                    "keyboard typos, phonetic substitutions, entirely different words, "
+                    "and word-swap detection. Complements the native recovery tabs above."
+                )
+                render_status_cards([
+                    ("ENGINE", "BTCRecover 1.13 subprocess", "green"),
+                    ("HARDWARE", "CPU · Offline", "green"),
+                    ("SUPPORTED", "BIP39 · Electrum", ""),
+                    ("INSTALLED AT", _btcr.BTCRECOVER_DIR[:40] + "…", ""),
+                ])
+                st.divider()
+
+                br_mnemonic = st.text_area(
+                    "KNOWN MNEMONIC (with typos / partial words)",
+                    value="",
+                    key="br_mnemonic",
+                    height=100,
+                    placeholder="Enter all words as remembered — typos are OK",
+                )
+                br_addr = st.text_input(
+                    "TARGET WALLET ADDRESS (highly recommended)",
+                    key="br_addr",
+                    placeholder="bc1q...  or  1...  or  3...  or  0x...",
+                )
+                br_lang = st.selectbox(
+                    "WORDLIST LANGUAGE",
+                    ["en", "es", "fr", "it", "ja", "ko", "pt", "zh-hans", "zh-hant", "cs"],
+                    key="br_lang",
+                )
+                br_wallet_type = st.selectbox(
+                    "WALLET TYPE",
+                    ["bip39", "electrum2"],
+                    key="br_wallet_type",
+                )
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    br_typos = st.number_input(
+                        "KEYBOARD TYPOS (--typos)",
+                        min_value=0, max_value=4, value=1, key="br_typos",
+                        help="Max number of keyboard/phonetic mistakes to correct.",
+                    )
+                with c2:
+                    br_big_typos = st.number_input(
+                        "DIFFERENT WORDS (--big-typos)",
+                        min_value=0, max_value=2, value=0, key="br_big_typos",
+                        help="Max number of entirely wrong words (tries all 2048 BIP39 words at each position).",
+                    )
+
+                br_addr_limit = st.number_input(
+                    "ADDRESSES TO CHECK PER PATH",
+                    min_value=1, max_value=50, value=10, key="br_addr_limit",
+                )
+
+                if _btn("RUN BTCRECOVER SEED RECOVERY", key="br_run", variant="orange"):
+                    if not br_mnemonic.strip():
+                        st.warning("Enter the mnemonic first.")
+                    elif not br_addr.strip():
+                        st.warning("A target address is strongly recommended — without it BTCRecover cannot confirm correctness.")
+                    else:
+                        argv = _btcr.seed_recovery_argv(
+                            mnemonic=br_mnemonic.strip(),
+                            wallet_type=br_wallet_type,
+                            addrs=br_addr.strip(),
+                            language=br_lang,
+                            typos=int(br_typos),
+                            big_typos=int(br_big_typos),
+                            addr_limit=int(br_addr_limit),
+                        )
+
+                        log_event("info", f"BTCRecover seed recovery — typos={br_typos} big={br_big_typos}")
+
+                        output_ph = st.empty()
+                        output_buf: list[str] = []
+
+                        def _on_line(line: str) -> None:
+                            output_buf.append(line)
+                            output_ph.code("\n".join(output_buf[-40:]), language="text")
+
+                        with st.spinner("BTCRecover running..."):
+                            br_result = _btcr.run_btcrseed(argv, line_callback=_on_line)
+
+                        if br_result["found"] and br_result["result"]:
+                            log_event("ok", "BTCRecover: seed found")
+                            st.success("SEED FOUND")
+                            st.code(br_result["result"], language="text")
+                            st.session_state["recovery_candidates"] = [br_result["result"]]
+                        elif br_result["error"]:
+                            log_event("err", f"BTCRecover error: {br_result['error']}")
+                            st.error(f"Error: {br_result['error']}")
+                        else:
+                            log_event("warn", "BTCRecover: seed not found")
+                            st.error(
+                                "Seed not found. Try increasing typos, enabling big-typos, "
+                                "or verifying the target address is correct."
+                            )
+
             close_box()
 
     with col2:
@@ -3337,10 +3450,11 @@ def page_walletdat():
             "SHA-512 stretching makes this ~100× faster than BIP38."
         )
 
-        wl_tab, tl_tab, bf_tab = st.tabs([
+        wl_tab, tl_tab, bf_tab, btcr_tab = st.tabs([
             "WORDLIST",
             "TOKENLIST (BTCRecover Mode)",
             "BRUTE FORCE",
+            "BTCRECOVER ENGINE",
         ])
 
         # ── Tab 1: WORDLIST ───────────────────────────────────────────────
@@ -3498,6 +3612,129 @@ def page_walletdat():
                         st.session_state.get("wd_bf_sfx", ""),
                     )
                     _run_walletdat_attack(candidates, mkey)
+
+        # ── Tab 4: BTCRecover ENGINE ──────────────────────────────────────
+        with btcr_tab:
+            if not _btcr.is_available():
+                st.error(
+                    f"BTCRecover not found at `{_btcr.BTCRECOVER_DIR}`. "
+                    "Update `BTCRECOVER_DIR` in `btcrecover_utils.py`."
+                )
+            else:
+                st.markdown(
+                    "Run BTCRecover's native wallet.dat engine. "
+                    "Supports tokenlist files, wordlists, and typo rules. "
+                    "The uploaded wallet.dat is saved to a temporary file, "
+                    "used for the attack, then immediately deleted."
+                )
+                render_status_cards([
+                    ("ENGINE", "BTCRecover 1.13 subprocess", "green"),
+                    ("WALLET TYPE", "Bitcoin Core wallet.dat", ""),
+                    ("SPEED", "~100–300 passwords/sec (CPU)", ""),
+                    ("OFFLINE", "YES", "green"),
+                ])
+                st.divider()
+
+                btcr_input_mode = st.radio(
+                    "INPUT MODE",
+                    ["Paste Password List", "Paste Tokenlist (BTCRecover format)"],
+                    key="wd_btcr_mode",
+                    horizontal=True,
+                )
+                if "Tokenlist" in btcr_input_mode:
+                    wd_btcr_input = st.text_area(
+                        "TOKENLIST (BTCRecover format)",
+                        key="wd_btcr_tokenlist",
+                        height=120,
+                        placeholder="# BTCRecover tokenlist\n+ ^bitcoin\nwallet password\n2020 2021 2022\n!@#$",
+                    )
+                else:
+                    wd_btcr_input = st.text_area(
+                        "PASSWORD LIST (one per line)",
+                        key="wd_btcr_wordlist",
+                        height=120,
+                        placeholder="password\nsecret123\nbitcoin2020",
+                    )
+
+                btcr_wd_typos = st.number_input(
+                    "--typos (keyboard/insertion/deletion mistakes)",
+                    min_value=0, max_value=3, value=0, key="wd_btcr_typos",
+                )
+
+                if _btn("RUN BTCRECOVER ATTACK", key="wd_btcr_run", variant="red"):
+                    mkey_check = st.session_state.get("wd_mkey")
+                    wallet_info = st.session_state.get("wd_info")
+                    if not mkey_check:
+                        st.error("Upload a wallet.dat file first.")
+                        st.stop()
+                    if not wd_btcr_input.strip():
+                        st.error("Enter a password list or tokenlist.")
+                        st.stop()
+
+                    # Re-read wallet bytes from the uploader if available,
+                    # or warn that the file must be re-uploaded.
+                    wd_uploaded = st.session_state.get("wd_file")
+                    if wd_uploaded is None:
+                        st.error(
+                            "Re-upload the wallet.dat file — the uploader clears "
+                            "after page reload but BTCRecover needs the actual file on disk."
+                        )
+                        st.stop()
+
+                    wd_temp_path: str | None = None
+                    tl_temp_path: str | None = None
+
+                    try:
+                        # Write wallet bytes to temp file
+                        wd_uploaded.seek(0)
+                        wd_temp_path = _btcr.write_temp_file(
+                            wd_uploaded.read(), suffix=".dat"
+                        )
+
+                        # Write input to temp file
+                        is_tokenlist = "Tokenlist" in btcr_input_mode
+                        tl_temp_path = _btcr.write_temp_file(
+                            wd_btcr_input.strip() + "\n",
+                            suffix=".txt",
+                        )
+
+                        argv = _btcr.wallet_attack_argv(
+                            wallet_path=wd_temp_path,
+                            tokenlist_path=tl_temp_path if is_tokenlist else None,
+                            passwordlist_path=tl_temp_path if not is_tokenlist else None,
+                            typos=int(btcr_wd_typos),
+                        )
+
+                        log_event("info", f"BTCRecover wallet.dat attack — typos={btcr_wd_typos}")
+
+                        out_ph = st.empty()
+                        out_buf: list[str] = []
+
+                        def _wd_line(line: str) -> None:
+                            out_buf.append(line)
+                            out_ph.code("\n".join(out_buf[-40:]), language="text")
+
+                        with st.spinner("BTCRecover attacking wallet.dat..."):
+                            btcr_res = _btcr.run_btcrpass(argv, line_callback=_wd_line)
+
+                    finally:
+                        for p in [wd_temp_path, tl_temp_path]:
+                            if p and os.path.exists(p):
+                                os.unlink(p)
+
+                    if btcr_res["found"] and btcr_res["result"]:
+                        log_event("ok", "BTCRecover wallet.dat: password found")
+                        st.success("PASSWORD FOUND")
+                        render_rblock([
+                            ("WALLET UNLOCKED", "YES",                        "rv"),
+                            ("PASSWORD",        btcr_res["result"],           "rv"),
+                        ])
+                    elif btcr_res["error"]:
+                        log_event("err", f"BTCRecover error: {btcr_res['error']}")
+                        st.error(f"Error: {btcr_res['error']}")
+                    else:
+                        log_event("warn", "BTCRecover wallet.dat: not found")
+                        st.error("Password not found in the provided list.")
 
         close_box()
 
