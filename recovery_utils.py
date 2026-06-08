@@ -34,6 +34,7 @@ multiprocessing and locked positions, we can calculate and warn before execution
 
 from __future__ import annotations
 
+import hashlib
 import math
 import multiprocessing
 import time
@@ -79,6 +80,39 @@ _WILDCARD = "*"
 # equals 2048^2 ≈ 4.2 M. For partial patterns the same cap applies to the
 # product of per-position candidate counts.
 _SEARCH_SPACE_CAP = 4_200_000
+
+
+# ---------------------------------------------------------------------------
+# Fast BIP39 checksum (avoids bip_utils overhead inside worker loops)
+# ---------------------------------------------------------------------------
+
+def _bip39_fast_checksum_valid(word_indices: list[int], n_words: int) -> bool:
+    """
+    BIP39 checksum via bit arithmetic + SHA256, with no bip_utils calls.
+
+    BIP39 encodes n_words * 11 bits total: ENT entropy bits + CS checksum bits,
+    where CS = ENT / 32. The checksum is the first CS bits of SHA256(entropy).
+
+    word_indices : BIP39 positional index (0-2047) for each word, in order.
+    n_words      : 12 | 15 | 18 | 21 | 24
+    """
+    cs_bits  = n_words * 11 // 33        # 12→4, 15→5, 18→6, 21→7, 24→8
+    ent_bits = n_words * 11 - cs_bits
+
+    value = 0
+    for idx in word_indices:
+        value = (value << 11) | idx
+
+    checksum    = value & ((1 << cs_bits) - 1)
+    entropy_int = value >> cs_bits
+    entropy     = entropy_int.to_bytes(ent_bits >> 3, "big")
+    expected    = hashlib.sha256(entropy).digest()[0] >> (8 - cs_bits)
+    return checksum == expected
+
+
+def _build_word_index_map(sorted_wordlist: list[str]) -> dict[str, int]:
+    """Map each BIP39 word to its positional index in the sorted wordlist."""
+    return {w: i for i, w in enumerate(sorted_wordlist)}
 
 
 # ---------------------------------------------------------------------------
@@ -265,14 +299,16 @@ def _recover_chunk_worker(args) -> dict:
     Multiprocessing worker for missing/partial-word recovery.
 
     args: (words, variable_positions, first_word_chunk,
-           remaining_cands_list, target_address)
+           remaining_cands_list, target_address, word_index_map, n_words)
 
-      variable_positions  – list of word indices that are variable (? or pattern)
-      first_word_chunk    – subset of the first position's candidate list
+      variable_positions   – list of word indices that are variable (? or pattern)
+      first_word_chunk     – subset of the first position's candidate list
       remaining_cands_list – list[list[str]] of candidate lists for positions 1..N
-      target_address      – optional address filter (None = no filter)
+      target_address       – optional address filter (None = no filter)
+      word_index_map       – {word: bip39_index} for fast checksum (no bip_utils)
+      n_words              – total word count (12/15/18/21/24)
     """
-    words, variable_positions, first_word_chunk, remaining_cands_list, target_address = args
+    words, variable_positions, first_word_chunk, remaining_cands_list, target_address, word_index_map, n_words = args
     candidates = []
     checked = 0
     checksum_passed = 0
@@ -281,25 +317,30 @@ def _recover_chunk_worker(args) -> dict:
     rest_positions = variable_positions[1:]
     trial = list(words)
 
+    # Pre-build the index array for the fixed positions so we only update
+    # variable slots per iteration (avoids repeated dict lookups).
+    fixed_indices = [word_index_map.get(w, 0) for w in trial]
+
+    def _check(trial_words: list[str], idx_arr: list[int]) -> None:
+        nonlocal checked, checksum_passed
+        checked += 1
+        if _bip39_fast_checksum_valid(idx_arr, n_words):
+            checksum_passed += 1
+            candidate = " ".join(trial_words)
+            if target_address is None or _first_address_matches(candidate, target_address):
+                candidates.append(candidate)
+
     for w0 in first_word_chunk:
         trial[pos0] = w0
+        fixed_indices[pos0] = word_index_map[w0]
         if not rest_positions:
-            checked += 1
-            candidate = " ".join(trial)
-            if validate_mnemonic(candidate)["valid"]:
-                checksum_passed += 1
-                if target_address is None or _first_address_matches(candidate, target_address):
-                    candidates.append(candidate)
+            _check(trial, fixed_indices)
         else:
             for combo in product(*remaining_cands_list):
                 for pos, w in zip(rest_positions, combo):
                     trial[pos] = w
-                checked += 1
-                candidate = " ".join(trial)
-                if validate_mnemonic(candidate)["valid"]:
-                    checksum_passed += 1
-                    if target_address is None or _first_address_matches(candidate, target_address):
-                        candidates.append(candidate)
+                    fixed_indices[pos] = word_index_map[w]
+                _check(trial, fixed_indices)
 
     return {
         "candidates": candidates,
@@ -541,6 +582,9 @@ def recover_missing_words(
         )
 
     # --- enumerate candidates using multiprocessing ----------------------
+    n_words = len(words)
+    word_index_map = _build_word_index_map(sorted_wordlist)
+
     pos0_candidates = candidates_per_position[variable_positions[0]]
     remaining_cands_list = [
         candidates_per_position[pos] for pos in variable_positions[1:]
@@ -549,7 +593,7 @@ def recover_missing_words(
     chunk_size = 128 if len(variable_positions) == 1 else 32
     chunks = [pos0_candidates[i:i + chunk_size] for i in range(0, len(pos0_candidates), chunk_size)]
     tasks = [
-        (words, variable_positions, chunk, remaining_cands_list, target_address)
+        (words, variable_positions, chunk, remaining_cands_list, target_address, word_index_map, n_words)
         for chunk in chunks
     ]
 
