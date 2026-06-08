@@ -590,37 +590,51 @@ def recover_missing_words(
         candidates_per_position[pos] for pos in variable_positions[1:]
     ]
 
-    chunk_size = 128 if len(variable_positions) == 1 else 32
-    chunks = [pos0_candidates[i:i + chunk_size] for i in range(0, len(pos0_candidates), chunk_size)]
-    tasks = [
-        (words, variable_positions, chunk, remaining_cands_list, target_address, word_index_map, n_words)
-        for chunk in chunks
-    ]
-
     start_time = time.time()
     candidates: list[str] = []
     checked_count = 0
     checksum_passed_count = 0
     truncated = False
 
-    num_workers = max(1, multiprocessing.cpu_count() - 1)
+    # For small search spaces, pool startup cost exceeds the computation —
+    # run single-threaded. Only spin up workers for genuinely large searches.
+    _MULTIPROC_THRESHOLD = 50_000
+    use_multiproc = total_combinations > _MULTIPROC_THRESHOLD
 
-    with multiprocessing.Pool(num_workers) as pool:
-        for res in pool.imap_unordered(_recover_chunk_worker, tasks):
-            checked_count += res["checked"]
-            checksum_passed_count += res["checksum_passed"]
-            for cand in res["candidates"]:
-                if cand not in candidates:
-                    candidates.append(cand)
-                    if len(candidates) >= _MAX_RETURNED_CANDIDATES:
-                        truncated = True
-
-            if progress_callback:
-                progress_callback(checked_count, total_combinations, len(candidates))
-
-            if truncated:
-                pool.terminate()
-                break
+    if use_multiproc:
+        # Larger chunks reduce pickle overhead (word_index_map sent once per chunk).
+        chunk_size = 256 if len(variable_positions) == 1 else 64
+        chunks = [pos0_candidates[i:i + chunk_size] for i in range(0, len(pos0_candidates), chunk_size)]
+        tasks = [
+            (words, variable_positions, chunk, remaining_cands_list, target_address, word_index_map, n_words)
+            for chunk in chunks
+        ]
+        num_workers = max(1, multiprocessing.cpu_count() - 1)
+        with multiprocessing.Pool(num_workers) as pool:
+            for res in pool.imap_unordered(_recover_chunk_worker, tasks):
+                checked_count += res["checked"]
+                checksum_passed_count += res["checksum_passed"]
+                for cand in res["candidates"]:
+                    if cand not in candidates:
+                        candidates.append(cand)
+                        if len(candidates) >= _MAX_RETURNED_CANDIDATES:
+                            truncated = True
+                if progress_callback:
+                    progress_callback(checked_count, total_combinations, len(candidates))
+                if truncated:
+                    pool.terminate()
+                    break
+    else:
+        # Single-threaded fast path — avoids pool overhead for small spaces.
+        single_task = (words, variable_positions, pos0_candidates, remaining_cands_list,
+                       target_address, word_index_map, n_words)
+        res = _recover_chunk_worker(single_task)
+        checked_count = res["checked"]
+        checksum_passed_count = res["checksum_passed"]
+        candidates = res["candidates"][:_MAX_RETURNED_CANDIDATES]
+        truncated = len(res["candidates"]) > _MAX_RETURNED_CANDIDATES
+        if progress_callback:
+            progress_callback(checked_count, total_combinations, len(candidates))
 
     elapsed_time = time.time() - start_time
 
