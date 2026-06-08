@@ -464,6 +464,7 @@ def recover_missing_words(
     target_address: str | None = None,
     max_unknowns: int = 2,
     progress_callback: Callable[[int, int, int], None] | None = None,
+    max_returned: int = _MAX_RETURNED_CANDIDATES,
 ) -> dict:
     """
     Brute-force fill in variable positions in a partial BIP39 mnemonic.
@@ -609,6 +610,7 @@ def recover_missing_words(
             (words, variable_positions, chunk, remaining_cands_list, target_address, word_index_map, n_words)
             for chunk in chunks
         ]
+        _cap = max_returned if max_returned > 0 else 0
         num_workers = max(1, multiprocessing.cpu_count() - 1)
         with multiprocessing.Pool(num_workers) as pool:
             for res in pool.imap_unordered(_recover_chunk_worker, tasks):
@@ -617,7 +619,7 @@ def recover_missing_words(
                 for cand in res["candidates"]:
                     if cand not in candidates:
                         candidates.append(cand)
-                        if len(candidates) >= _MAX_RETURNED_CANDIDATES:
+                        if _cap and len(candidates) >= _cap:
                             truncated = True
                 if progress_callback:
                     progress_callback(checked_count, total_combinations, len(candidates))
@@ -631,8 +633,9 @@ def recover_missing_words(
         res = _recover_chunk_worker(single_task)
         checked_count = res["checked"]
         checksum_passed_count = res["checksum_passed"]
-        candidates = res["candidates"][:_MAX_RETURNED_CANDIDATES]
-        truncated = len(res["candidates"]) > _MAX_RETURNED_CANDIDATES
+        _cap = max_returned if max_returned > 0 else 0
+        candidates = res["candidates"] if not _cap else res["candidates"][:_cap]
+        truncated = bool(_cap) and len(res["candidates"]) > _cap
         if progress_callback:
             progress_callback(checked_count, total_combinations, len(candidates))
 

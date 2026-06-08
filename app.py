@@ -61,6 +61,7 @@ from recovery_utils import (
     _WILDCARD,
     _UNKNOWN_TOKEN as _REC_UNKNOWN_TOKEN,
     _SEARCH_SPACE_CAP,
+    _MAX_RETURNED_CANDIDATES,
 )
 import btcrecover_utils as _btcr
 from derivation_utils import (
@@ -1804,8 +1805,8 @@ def page_incomplete_seed():
         "MISSING WORDS · PARTIAL WORDS · BRUTE FORCE ENGINE",
     )
     col1, col2 = st.columns([3, 2])
-    with col1:
-        tab_missing, tab_extra, tab_btcr = st.tabs(["MISSING WORDS", "EXTRA WORD", "BTCRECOVER ENGINE"])
+        with col1:
+            tab_missing, tab_extra, tab_btcr = st.tabs(["MISSING WORDS", "EXTRA WORD", "VERIFICATION ENGINE"])
 
         # ── Tab 1: Missing / Partial Word Recovery ─────────────────────────
         with tab_missing:
@@ -1890,7 +1891,7 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                 ]
                 render_data_table(headers, rows)
                 space_color = "green" if search_space_estimate <= _SEARCH_SPACE_CAP else "red"
-                _engine_label = "HYBRID (Python + BTCRecover)" if _btcr.is_available() else "OFFLINE (MULTIPROCESSING)"
+                _engine_label = "HYBRID (Python + verification engine)" if _btcr.is_available() else "OFFLINE (MULTIPROCESSING)"
                 render_status_cards([
                     ("VARIABLE POSITIONS", str(len(pattern_info)), "orange"),
                     ("SEARCH SPACE", f"{search_space_estimate:,}", space_color),
@@ -1898,7 +1899,7 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                     ("LAST CHECKED", str(st.session_state.get("inc_last_checked", 0)), ""),
                 ])
             else:
-                _engine_label = "HYBRID (Python + BTCRecover)" if _btcr.is_available() else "OFFLINE (MULTIPROCESSING)"
+                _engine_label = "HYBRID (Python + verification engine)" if _btcr.is_available() else "OFFLINE (MULTIPROCESSING)"
                 render_status_cards([
                     ("VARIABLE POSITIONS", "0" if phrase.strip() else "—", ""),
                     ("ENGINE", _engine_label, "green"),
@@ -1950,139 +1951,252 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                     log_event("info", f"Starting recovery — {len(pattern_info)} variable position(s) — hybrid={use_hybrid}")
 
                     if use_hybrid:
-                        # ── Phase 1: fast Python checksum sweep (no address) ──
-                        cs_bar = st.progress(0.0)
-                        cs_status = st.empty()
+                        import time as _time
+                        from datetime import datetime as _dt
+
+                        _term_lines: list[str] = []
+                        _term_ph = st.empty()
+                        _prog_bar = st.progress(0.0)
+
+                        def _tlog(msg: str) -> None:
+                            ts = _dt.now().strftime("%H:%M:%S")
+                            _term_lines.append(f"[{ts}] {msg}")
+                            _term_ph.code("\n".join(_term_lines[-40:]), language="text")
+
+                        _tlog("Cryptex Recovery Engine — HYBRID MODE")
+                        _tlog(f"Unknown positions: {len(pattern_info)}  |  Search space: {search_space_estimate:,}")
+                        _tlog(f"Target address: {target_arg}")
+                        _tlog("─" * 60)
+                        _tlog("PHASE 1 — Checksum sweep (Python multiprocessing)")
+                        _tlog("Scanning all combinations for BIP39-valid checksums...")
 
                         def _inc_cs_cb(checked, total, found):
-                            cs_bar.progress(min(1.0, checked / total))
-                            cs_status.markdown(
-                                f"**Phase 1 — Checksum sweep:** {checked:,} / {total:,} "
-                                f"· {found} valid"
+                            pct = min(1.0, checked / total)
+                            _prog_bar.progress(pct)
+                            _tlog(
+                                f"  Checked {checked:>12,} / {total:,}  "
+                                f"({pct*100:5.1f}%)  |  valid: {found:,}"
                             )
 
-                        with st.spinner("Phase 1: scanning checksum-valid candidates…"):
-                            try:
-                                cs_result = recover_missing_words(
-                                    phrase,
-                                    target_address=None,
-                                    max_unknowns=MAX_MISSING_WORDS,
-                                    progress_callback=_inc_cs_cb,
-                                )
-                            except ValueError as e:
-                                log_event("err", f"Recovery error: {e}")
-                                st.error(str(e))
-                                st.stop()
+                        _t0 = _time.perf_counter()
+                        try:
+                            cs_result = recover_missing_words(
+                                phrase,
+                                target_address=None,
+                                max_unknowns=MAX_MISSING_WORDS,
+                                progress_callback=_inc_cs_cb,
+                                max_returned=0,
+                            )
+                        except ValueError as e:
+                            log_event("err", f"Recovery error: {e}")
+                            st.error(str(e))
+                            st.stop()
 
+                        _t1 = _time.perf_counter()
                         st.session_state["inc_last_checked"] = cs_result["checked"]
                         valid_seeds = cs_result["candidates"]
-                        cs_status.markdown(
-                            f"**Phase 1 complete** — {cs_result['checked']:,} checked · "
-                            f"**{len(valid_seeds)} checksum-valid** · {cs_result['elapsed_time']:.1f}s"
-                        )
-                        render_status_cards([
-                            ("SEARCH SPACE", f"{cs_result.get('search_space', 0):,}", ""),
-                            ("CHECKED", f"{cs_result['checked']:,}", ""),
-                            ("CHECKSUM VALID", f"{len(valid_seeds)}", "green"),
-                            ("PHASE 1 TIME", f"{cs_result['elapsed_time']:.1f}s", ""),
-                        ])
+                        _speed = int(cs_result["checked"] / max(cs_result["elapsed_time"], 0.001))
+                        _tlog("─" * 60)
+                        _tlog(f"PHASE 1 COMPLETE")
+                        _tlog(f"  Checked  : {cs_result['checked']:,}")
+                        _tlog(f"  Valid    : {len(valid_seeds):,} checksum-valid candidates")
+                        _tlog(f"  Time     : {_t1 - _t0:.2f}s  ({_speed:,} keys/s)")
+                        _prog_bar.progress(1.0)
 
                         if not valid_seeds:
+                            _tlog("ERROR: No checksum-valid candidates found.")
+                            _tlog("Check your known words for typos and try again.")
                             st.error("No checksum-valid candidates found. Check your known words for typos.")
                         else:
-                            # ── Phase 2: BTCRecover address verification ──────
-                            seedlist_path = None
+                            _tlog("─" * 60)
+                            _tlog("PHASE 2 — Address verification (verification engine)")
+                            _tlog(f"Verifying {len(valid_seeds):,} checksum-valid candidates...")
+                            _prog_bar.progress(0.0)
+                            # Choose verification strategy:
+                            # - If many candidates, use batch --seedlist mode for speed.
+                            #   Write the seedlist to a RAM-backed temp file and run once.
+                            # - Otherwise, verify candidates one-by-one (safer/no large files).
+                            hw_result = {"found": False, "result": None, "error": None}
+                            total = len(valid_seeds)
+                            n_words = len(phrase.strip().split())
+
+                            use_batch = False
                             try:
-                                seedlist_path = _btcr.write_temp_file(
-                                    "\n".join(valid_seeds), suffix=".txt"
-                                )
-                                n_words = len(phrase.strip().split())
-                                argv = _btcr.seedlist_argv(
-                                    seedlist_path=seedlist_path,
-                                    wallet_type="bip39",
-                                    addrs=target_arg,
-                                    language="en",
-                                    mnemonic_length=n_words,
-                                    addr_limit=10,
-                                )
-                                output_ph = st.empty()
-                                output_buf: list[str] = []
+                                # Heuristic: if more than 100 candidates, prefer batch mode
+                                use_batch = total > 100 and _btcr.is_available()
+                            except Exception:
+                                use_batch = False
 
-                                def _inc_btcr_line(line: str) -> None:
-                                    output_buf.append(line)
-                                    output_ph.code("\n".join(output_buf[-20:]), language="text")
+                            if use_batch:
+                                _tlog("Using fast verification mode (batch seedlist, RAM-only)")
+                                seedlist_path = None
+                                try:
+                                    seedlist_content = "\n".join(valid_seeds)
+                                    # write to RAM-backed temp area when possible
+                                    seedlist_path = _btcr.write_ram_temp_file(seedlist_content, suffix=".txt")
 
-                                with st.spinner(f"Phase 2: verifying {len(valid_seeds)} candidate(s) against address…"):
+                                    argv = _btcr.seedlist_argv(
+                                        seedlist_path=seedlist_path,
+                                        wallet_type="bip39",
+                                        addrs=target_arg,
+                                        language="en",
+                                        mnemonic_length=n_words,
+                                        addr_limit=10,
+                                    )
+
+                                    def _batch_line(line: str) -> None:
+                                        stripped = line.strip()
+                                        if stripped and not stripped.startswith("You may also"):
+                                            _tlog(f"  Verification: {stripped}")
+
+                                    hw_result = _btcr.run_btcrseed(argv, line_callback=_batch_line)
+                                finally:
+                                    if seedlist_path and os.path.exists(seedlist_path):
+                                        try:
+                                            os.unlink(seedlist_path)
+                                        except Exception:
+                                            pass
+                            else:
+                                for idx, candidate in enumerate(valid_seeds, start=1):
+                                    _prog_bar.progress(idx / max(1, total))
+                                    _tlog(f"  Verifying candidate {idx}/{total}...")
+
+                                    argv = _btcr.seed_recovery_argv(
+                                        candidate,
+                                        wallet_type="bip39",
+                                        addrs=target_arg,
+                                        language="en",
+                                        addr_limit=10,
+                                    )
+
+                                    def _inc_btcr_line(line: str) -> None:
+                                        stripped = line.strip()
+                                        if stripped and not stripped.startswith("You may also"):
+                                            # Use a generic label to avoid exposing the
+                                            # underlying engine name to the user interface.
+                                            _tlog(f"  Verification: {stripped}")
+
                                     hw_result = _btcr.run_btcrseed(argv, line_callback=_inc_btcr_line)
-                            finally:
-                                if seedlist_path and os.path.exists(seedlist_path):
-                                    os.unlink(seedlist_path)
 
+                                    if hw_result.get("found"):
+                                        break
+
+                            _tlog("─" * 60)
                             if hw_result["found"] and hw_result["result"]:
+                                _tlog("✓ SEED CONFIRMED — address match found")
                                 log_event("ok", "Recovery: seed confirmed")
                                 st.success("WALLET SEED FOUND")
                                 st.code(hw_result["result"], language="text")
                                 st.session_state["recovery_candidates"] = [hw_result["result"]]
                             elif hw_result["error"]:
-                                log_event("err", f"BTCRecover error: {hw_result['error']}")
+                                _tlog(f"ERROR: {hw_result['error']}")
+                                log_event("err", f"Verification engine error: {hw_result['error']}")
                                 st.error(f"Phase 2 error: {hw_result['error']}")
                             else:
+                                _tlog(f"No match found among {len(valid_seeds):,} candidates.")
+                                _tlog("Verify the address is correct and known words have no typos.")
                                 log_event("warn", "No candidate matched the address")
                                 st.warning(
-                                    f"None of the {len(valid_seeds)} checksum-valid candidates "
+                                    f"None of the {len(valid_seeds):,} checksum-valid candidates "
                                     "matched the address. Verify the address is correct and "
                                     "the known words have no typos."
                                 )
                     else:
-                        # ── Pure Python path (no address, or BTCRecover absent) ──
-                        progress_bar = st.progress(0.0)
-                        status_text = st.empty()
+                        # ── Pure Python path (no address, or verification engine absent) ──
+                        import time as _time
+                        from datetime import datetime as _dt
 
-                        def update_progress(checked, total, found):
-                            pct = min(1.0, float(checked) / total)
-                            progress_bar.progress(pct)
-                            status_text.markdown(
-                                f"**Checked**: {checked:,} / {total:,} ({pct*100:.1f}%) | "
-                                f"**Candidates Found**: {found}"
+                        _term_lines2: list[str] = []
+                        _term_ph2 = st.empty()
+                        _prog_bar2 = st.progress(0.0)
+
+                        def _tlog2(msg: str) -> None:
+                            ts = _dt.now().strftime("%H:%M:%S")
+                            _term_lines2.append(f"[{ts}] {msg}")
+                            _term_ph2.code("\n".join(_term_lines2[-40:]), language="text")
+
+                        _mode_str = "Checksum sweep — no address filter" if not target_arg else "Checksum + address match (Python)"
+                        _tlog2("Cryptex Recovery Engine — PYTHON MODE")
+                        _tlog2(f"Mode     : {_mode_str}")
+                        _tlog2(f"Unknown  : {len(pattern_info)} position(s)  |  Search space: {search_space_estimate:,}")
+                        _tlog2("─" * 60)
+                        _tlog2("Starting checksum sweep...")
+
+                        def _py_cb(checked, total, found):
+                            pct = min(1.0, checked / total)
+                            _prog_bar2.progress(pct)
+                            _tlog2(
+                                f"  Checked {checked:>12,} / {total:,}  "
+                                f"({pct*100:5.1f}%)  |  found: {found}"
                             )
 
-                        with st.spinner("Searching…"):
-                            try:
-                                result = recover_missing_words(
-                                    phrase,
-                                    target_address=target_arg,
-                                    max_unknowns=MAX_MISSING_WORDS,
-                                    progress_callback=update_progress,
-                                )
-                            except ValueError as e:
-                                log_event("err", f"Recovery error: {e}")
-                                st.error(str(e))
-                                st.stop()
+                        _t0 = _time.perf_counter()
+                        try:
+                            result = recover_missing_words(
+                                phrase,
+                                target_address=target_arg,
+                                max_unknowns=MAX_MISSING_WORDS,
+                                progress_callback=_py_cb,
+                                max_returned=0 if not target_arg else _MAX_RETURNED_CANDIDATES,
+                            )
+                        except ValueError as e:
+                            log_event("err", f"Recovery error: {e}")
+                            st.error(str(e))
+                            st.stop()
 
+                        _t1 = _time.perf_counter()
+                        _speed2 = int(result["checked"] / max(result["elapsed_time"], 0.001))
+                        _prog_bar2.progress(1.0)
                         st.session_state["inc_last_checked"] = result["checked"]
                         cand = result["candidates"]
 
-                        render_status_cards([
-                            ("SEARCH SPACE", f"{result.get('search_space', 0):,}", ""),
-                            ("TOTAL CHECKED", f"{result['checked']:,}", ""),
-                            ("CHECKSUM PASSED", f"{result['checksum_passed']:,}", "green"),
-                            ("SPEED", f"{int(result['checked'] / (result['elapsed_time'] or 0.001)):,} keys/s", ""),
-                        ])
+                        _tlog2("─" * 60)
+                        _tlog2("SWEEP COMPLETE")
+                        _tlog2(f"  Checked  : {result['checked']:,}")
+                        _tlog2(f"  Checksum : {result['checksum_passed']:,} valid")
+                        _tlog2(f"  Found    : {len(cand)} candidate(s)")
+                        _tlog2(f"  Time     : {_t1 - _t0:.2f}s  ({_speed2:,} keys/s)")
+                        if cand:
+                            _tlog2("─" * 60)
+                            for _c in cand[:5]:
+                                _tlog2(f"  >> {_c}")
+                            if len(cand) > 5:
+                                _tlog2(f"  ... and {len(cand) - 5} more (see below)")
 
                         if cand:
                             log_event("ok", f"Recovered {len(cand)} candidate(s) in {result['elapsed_time']:.2f}s")
                             mode_label = "address-verified" if target_arg else "checksum-valid"
                             st.success(f"Found {len(cand)} {mode_label} candidate(s) in {result['elapsed_time']:.2f}s.")
                             st.session_state["recovery_candidates"] = cand
-                            for c in cand[:10]:
-                                st.code(c, language="text")
-                            if result["truncated"]:
-                                st.warning("Result list truncated at 100 candidates.")
-                            if not target_arg and len(cand) > 1:
-                                st.info(
-                                    f"{len(cand)} checksum-valid candidates returned. "
-                                    "Enter a wallet address above to identify the correct one."
+
+                            if target_arg:
+                                for c in cand[:10]:
+                                    st.code(c, language="text")
+                            else:
+                                # No address — show first 100 and offer full download
+                                _ui_limit = min(100, len(cand))
+                                for c in cand[:_ui_limit]:
+                                    st.code(c, language="text")
+                                if len(cand) > _ui_limit:
+                                    st.warning(
+                                        f"Showing {_ui_limit} of {len(cand):,} checksum-valid candidates. "
+                                        "Download the full list below, or enter your wallet address above "
+                                        "to identify the correct seed automatically."
+                                    )
+                                st.download_button(
+                                    label=f"DOWNLOAD ALL {len(cand):,} CANDIDATES (.txt)",
+                                    data="\n".join(cand),
+                                    file_name="cryptex_candidates.txt",
+                                    mime="text/plain",
+                                    use_container_width=True,
                                 )
+                                if len(cand) > 1:
+                                    st.info(
+                                        f"{len(cand):,} checksum-valid candidates found. "
+                                        "Enter your wallet address above to identify the correct one automatically."
+                                    )
+                            if result["truncated"]:
+                                st.warning("Result list truncated — enter your wallet address above to identify the correct seed automatically.")
                         else:
                             log_event("warn", "No candidates produced")
                             if target_arg:
@@ -2200,21 +2314,19 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                             )
             close_box()
 
-        # ── Tab 3: BTCRecover Engine ───────────────────────────────────────
+        # ── Tab 3: Verification Engine ────────────────────────────────────
         with tab_btcr:
-            open_box("BTCRECOVER ENGINE — SEED RECOVERY", live=True)
+            open_box("VERIFICATION ENGINE — SEED RECOVERY", live=True)
 
             if not _btcr.is_available():
                 st.error(
-                    f"BTCRecover not found at `{_btcr.BTCRECOVER_DIR}`. "
-                    "Ensure the bundled btcrecover/ directory is present."
+                    "Verification engine unavailable. Hybrid features are disabled."
                 )
             else:
                 render_status_cards([
-                    ("ENGINE", "BTCRecover 1.13 subprocess", "green"),
+                    ("ENGINE", "Verification engine (bundled)", "green"),
                     ("HARDWARE", "CPU · Offline", "green"),
                     ("SUPPORTED", "BIP39 · Electrum", ""),
-                    ("INSTALLED AT", _btcr.BTCRECOVER_DIR[:40] + "…", ""),
                 ])
                 st.divider()
 
@@ -2225,9 +2337,9 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                     horizontal=True,
                     help=(
                         "MISSING WORDS: Python finds all checksum-valid candidates fast, "
-                        "then BTCRecover verifies against your address — much faster than "
+                        "then the verification engine checks against your address — much faster than "
                         "pure Python for address-verified searches.\n\n"
-                        "TYPO CORRECTION: BTCRecover tries keyboard/phonetic substitutions "
+                        "TYPO CORRECTION: The verification engine tries keyboard/phonetic substitutions "
                         "and entirely-different-word replacements."
                     ),
                 )
@@ -2252,7 +2364,7 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                     st.markdown(
                         "**How it works:** Mark unknown word positions with `?`. "
                         "Python scans all ~4.2M combinations and filters to checksum-valid "
-                        "candidates in seconds. BTCRecover then verifies each candidate "
+                        "candidates in seconds. The verification engine then verifies each candidate "
                         "against your address using multi-threaded BIP32 — far faster than "
                         "pure-Python address derivation."
                     )
@@ -2313,36 +2425,36 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                                 if not valid_seeds:
                                     st.error("No checksum-valid candidates found. Check your known words for typos.")
                                 else:
-                                    # ── Step 2: BTCRecover address verification ──
-                                    log_event("info", f"Hybrid recovery — phase 2: BTCRecover verifying {len(valid_seeds)} candidate(s)")
-                                    seedlist_path = None
-                                    try:
-                                        seedlist_content = "\n".join(valid_seeds)
-                                        seedlist_path = _btcr.write_temp_file(seedlist_content, suffix=".txt")
+                                    # ── Step 2: Address verification (per-candidate)
+                                    log_event("info", f"Hybrid recovery — phase 2: verification of {len(valid_seeds)} candidate(s)")
+                                    hw_result = {"found": False, "result": None, "error": None}
+                                    total = len(valid_seeds)
 
-                                        n_words = len(br_hw_mnemonic.strip().split())
-                                        argv = _btcr.seedlist_argv(
-                                            seedlist_path=seedlist_path,
-                                            wallet_type=br_wallet_type,
-                                            addrs=br_hw_addr.strip(),
-                                            language=br_lang,
-                                            mnemonic_length=n_words,
-                                            addr_limit=int(br_addr_limit),
+                                    output_ph = st.empty()
+                                    output_buf: list[str] = []
+
+                                    def _hw_line(line: str) -> None:
+                                        output_buf.append(line)
+                                        output_ph.code("\n".join(output_buf[-30:]), language="text")
+
+                                    for idx, candidate in enumerate(valid_seeds, start=1):
+                                        cs_status.markdown(
+                                            f"**Verifying** candidate {idx}/{total} — progress {idx}/{total}"
                                         )
-
-                                        output_ph = st.empty()
-                                        output_buf: list[str] = []
-
-                                        def _hw_line(line: str) -> None:
-                                            output_buf.append(line)
-                                            output_ph.code("\n".join(output_buf[-30:]), language="text")
-
-                                        with st.spinner(f"Phase 2: BTCRecover verifying {len(valid_seeds)} candidate(s)…"):
+                                        try:
+                                            argv = _btcr.seed_recovery_argv(
+                                                candidate,
+                                                wallet_type=br_wallet_type,
+                                                addrs=br_hw_addr.strip(),
+                                                language=br_lang,
+                                                addr_limit=int(br_addr_limit),
+                                            )
                                             hw_result = _btcr.run_btcrseed(argv, line_callback=_hw_line)
+                                        except Exception as e:
+                                            hw_result = {"found": False, "result": None, "error": str(e)}
 
-                                    finally:
-                                        if seedlist_path and os.path.exists(seedlist_path):
-                                            os.unlink(seedlist_path)
+                                        if hw_result.get("found"):
+                                            break
 
                                     if hw_result["found"] and hw_result["result"]:
                                         log_event("ok", "Hybrid recovery: seed found")
@@ -2351,7 +2463,7 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                                         st.session_state["recovery_candidates"] = [hw_result["result"]]
                                     elif hw_result["error"]:
                                         log_event("err", f"Hybrid recovery error: {hw_result['error']}")
-                                        st.error(f"BTCRecover error: {hw_result['error']}")
+                                        st.error(f"Verification engine error: {hw_result['error']}")
                                     else:
                                         log_event("warn", "Hybrid recovery: no match found")
                                         st.warning(
@@ -2362,7 +2474,7 @@ You may mix `?` and partial patterns freely. The total search space (product of 
 
                 else:  # TYPO CORRECTION mode
                     st.markdown(
-                        "BTCRecover tries keyboard-adjacent substitutions, phonetic matches, "
+                        "The verification engine tries keyboard-adjacent substitutions, phonetic matches, "
                         "and entirely-different-word replacements against your target address."
                     )
                     br_mnemonic = st.text_area(
@@ -2392,7 +2504,7 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                             help="Max number of entirely wrong words.",
                         )
 
-                    if _btn("RUN BTCRECOVER", key="br_run", variant="orange"):
+                    if _btn("RUN RECOVERY", key="br_run", variant="orange"):
                         if not br_mnemonic.strip():
                             st.warning("Enter the mnemonic first.")
                         else:
@@ -2405,7 +2517,7 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                                 big_typos=int(br_big_typos),
                                 addr_limit=int(br_addr_limit),
                             )
-                            log_event("info", f"BTCRecover typo recovery — typos={br_typos} big={br_big_typos}")
+                            log_event("info", f"Typo-recovery: typos={br_typos} big={br_big_typos}")
 
                             output_ph = st.empty()
                             output_buf: list[str] = []
@@ -2414,19 +2526,19 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                                 output_buf.append(line)
                                 output_ph.code("\n".join(output_buf[-40:]), language="text")
 
-                            with st.spinner("BTCRecover running..."):
+                            with st.spinner("Running verification engine..."):
                                 br_result = _btcr.run_btcrseed(argv, line_callback=_on_line)
 
                             if br_result["found"] and br_result["result"]:
-                                log_event("ok", "BTCRecover: seed found")
+                                log_event("ok", "Seed found")
                                 st.success("SEED FOUND")
                                 st.code(br_result["result"], language="text")
                                 st.session_state["recovery_candidates"] = [br_result["result"]]
                             elif br_result["error"]:
-                                log_event("err", f"BTCRecover error: {br_result['error']}")
+                                log_event("err", f"Verification engine error: {br_result['error']}")
                                 st.error(f"Error: {br_result['error']}")
                             else:
-                                log_event("warn", "BTCRecover: seed not found")
+                                log_event("warn", "Seed not found")
                                 st.error(
                                     "Seed not found. Try increasing typos, enabling big-typos, "
                                     "or verifying the target address."
@@ -3238,7 +3350,7 @@ def page_bip38():
         # ── Attack mode tabs ────────────────────────────────────────────────
         wl_tab, tl_tab, bf_tab = st.tabs([
             "WORDLIST",
-            "TOKENLIST (BTCRecover Mode)",
+            "TOKENLIST (Verification Mode)",
             "BRUTE FORCE",
         ])
 
@@ -3279,11 +3391,11 @@ def page_bip38():
                 candidates = apply_bip38_mutations(raw_lines, wl_rules)
                 _run_attack(candidates, enc, tgt)
 
-        # ── Tab 2: TOKENLIST (BTCRecover Mode) ──────────────────────────────
+        # ── Tab 2: TOKENLIST (Verification Mode) ──────────────────────────
         with tl_tab:
             st.caption(
                 "Define password **fragments** you remember. The tool tries every combination "
-                "and ordering. This is the core of the BTCRecover tokenlist approach."
+                "and ordering. This is the core of the verification engine's tokenlist approach."
             )
             st.markdown(
                 """
@@ -3471,7 +3583,7 @@ The encrypted key starts with `6P` and is ~51 characters long.
 
 **Wordlist** — paste or upload a list of passphrase candidates. Add typo/mutation rules to automatically expand each word into variants (case, leet, number suffixes, etc.).
 
-**Tokenlist (BTCRecover Mode)** — define password *fragments* you remember. The tool combines and permutes them like BTCRecover's tokenlist engine:
+**Tokenlist (Verification Mode)** — define password *fragments* you remember. The tool combines and permutes them like the verification engine's tokenlist approach:
 - Space-separated tokens on one line = mutually exclusive alternatives
 - `+` prefix = required in every guess
 - `^token` / `token$` = begin / end anchors
@@ -3663,9 +3775,9 @@ def page_walletdat():
 
         wl_tab, tl_tab, bf_tab, btcr_tab = st.tabs([
             "WORDLIST",
-            "TOKENLIST (BTCRecover Mode)",
+            "TOKENLIST (Verification Mode)",
             "BRUTE FORCE",
-            "BTCRECOVER ENGINE",
+            "VERIFICATION ENGINE",
         ])
 
         # ── Tab 1: WORDLIST ───────────────────────────────────────────────
@@ -3708,7 +3820,7 @@ def page_walletdat():
         with tl_tab:
             st.caption(
                 "Define password **fragments** you remember and let the tool combine them. "
-                "Same BTCRecover tokenlist format as the BIP38 page."
+                "Same verification tokenlist format as the BIP38 page."
             )
             st.markdown(
                 "| Syntax | Meaning |\n|---|---|\n"
@@ -3824,22 +3936,21 @@ def page_walletdat():
                     )
                     _run_walletdat_attack(candidates, mkey)
 
-        # ── Tab 4: BTCRecover ENGINE ──────────────────────────────────────
+        # ── Tab 4: VERIFICATION ENGINE ───────────────────────────────────
         with btcr_tab:
             if not _btcr.is_available():
                 st.error(
-                    f"BTCRecover not found at `{_btcr.BTCRECOVER_DIR}`. "
-                    "Update `BTCRECOVER_DIR` in `btcrecover_utils.py`."
+                    "Verification engine unavailable. Hybrid features are disabled."
                 )
             else:
                 st.markdown(
-                    "Run BTCRecover's native wallet.dat engine. "
+                    "Run the bundled verification engine's wallet.dat module. "
                     "Supports tokenlist files, wordlists, and typo rules. "
                     "The uploaded wallet.dat is saved to a temporary file, "
                     "used for the attack, then immediately deleted."
                 )
                 render_status_cards([
-                    ("ENGINE", "BTCRecover 1.13 subprocess", "green"),
+                    ("ENGINE", "Verification engine (bundled)", "green"),
                     ("WALLET TYPE", "Bitcoin Core wallet.dat", ""),
                     ("SPEED", "~100–300 passwords/sec (CPU)", ""),
                     ("OFFLINE", "YES", "green"),
@@ -3848,16 +3959,16 @@ def page_walletdat():
 
                 btcr_input_mode = st.radio(
                     "INPUT MODE",
-                    ["Paste Password List", "Paste Tokenlist (BTCRecover format)"],
+                    ["Paste Password List", "Paste Tokenlist (verification format)"],
                     key="wd_btcr_mode",
                     horizontal=True,
                 )
                 if "Tokenlist" in btcr_input_mode:
                     wd_btcr_input = st.text_area(
-                        "TOKENLIST (BTCRecover format)",
+                        "TOKENLIST (verification format)",
                         key="wd_btcr_tokenlist",
                         height=120,
-                        placeholder="# BTCRecover tokenlist\n+ ^bitcoin\nwallet password\n2020 2021 2022\n!@#$",
+                        placeholder="# tokenlist\n+ ^bitcoin\nwallet password\n2020 2021 2022\n!@#$",
                     )
                 else:
                     wd_btcr_input = st.text_area(
@@ -3872,7 +3983,7 @@ def page_walletdat():
                     min_value=0, max_value=3, value=0, key="wd_btcr_typos",
                 )
 
-                if _btn("RUN BTCRECOVER ATTACK", key="wd_btcr_run", variant="red"):
+                if _btn("RUN ATTACK", key="wd_btcr_run", variant="red"):
                     mkey_check = st.session_state.get("wd_mkey")
                     wallet_info = st.session_state.get("wd_info")
                     if not mkey_check:
@@ -3888,7 +3999,7 @@ def page_walletdat():
                     if wd_uploaded is None:
                         st.error(
                             "Re-upload the wallet.dat file — the uploader clears "
-                            "after page reload but BTCRecover needs the actual file on disk."
+                            "after page reload but the verification engine needs the actual file on disk."
                         )
                         st.stop()
 
@@ -3916,7 +4027,7 @@ def page_walletdat():
                             typos=int(btcr_wd_typos),
                         )
 
-                        log_event("info", f"BTCRecover wallet.dat attack — typos={btcr_wd_typos}")
+                        log_event("info", f"Wallet.dat attack (typos={btcr_wd_typos})")
 
                         out_ph = st.empty()
                         out_buf: list[str] = []
@@ -3925,7 +4036,7 @@ def page_walletdat():
                             out_buf.append(line)
                             out_ph.code("\n".join(out_buf[-40:]), language="text")
 
-                        with st.spinner("BTCRecover attacking wallet.dat..."):
+                        with st.spinner("Running verification engine on wallet.dat..."):
                             btcr_res = _btcr.run_btcrpass(argv, line_callback=_wd_line)
 
                     finally:
@@ -3934,17 +4045,17 @@ def page_walletdat():
                                 os.unlink(p)
 
                     if btcr_res["found"] and btcr_res["result"]:
-                        log_event("ok", "BTCRecover wallet.dat: password found")
+                        log_event("ok", "Wallet.dat: password found")
                         st.success("PASSWORD FOUND")
                         render_rblock([
                             ("WALLET UNLOCKED", "YES",                        "rv"),
                             ("PASSWORD",        btcr_res["result"],           "rv"),
                         ])
                     elif btcr_res["error"]:
-                        log_event("err", f"BTCRecover error: {btcr_res['error']}")
+                        log_event("err", f"Verification engine error: {btcr_res['error']}")
                         st.error(f"Error: {btcr_res['error']}")
                     else:
-                        log_event("warn", "BTCRecover wallet.dat: not found")
+                        log_event("warn", "Wallet.dat: not found")
                         st.error("Password not found in the provided list.")
 
         close_box()
@@ -4354,7 +4465,7 @@ def page_typo_lab():
         st.markdown(
             "Automatically try **keyboard, phonetic, and edit-distance alternatives** "
             "for every word position and report any combination that produces a valid "
-            "BIP39 checksum. This is the equivalent of BTCRecover's `--typos N` flag."
+            "BIP39 checksum. This is the equivalent of the verification engine's `--typos N` flag."
         )
         render_status_cards([
             ("METHOD", "KEYBOARD + PHONETIC + LEVENSHTEIN ≤2", "orange"),
@@ -4474,10 +4585,9 @@ Results ranked: keyboard first, then phonetic, then edit-distance.
         )
         close_box()
 
-        open_box("BTCRECOVER CLI GENERATOR")
+        open_box("VERIFICATION CLI GENERATOR")
         st.markdown(
-            "Generate the equivalent [BTCRecover](https://btcrecover.readthedocs.io) "
-            "command for GPU-accelerated recovery on an online machine."
+            "Generate the equivalent command for the verification engine to run on a separate machine."
         )
         cli_phrase = st.text_area(
             "Mnemonic (with typos / ? placeholders)",
@@ -4533,10 +4643,11 @@ Results ranked: keyboard first, then phonetic, then edit-distance.
                 else:
                     lines.append("  --addrs YOUR_WALLET_ADDRESS")
 
-                cmd = "\n".join(lines)
+                cmd = " ".join(s.rstrip(" \\\\") for s in lines)
+                cmd = cmd.replace("btcrecover.py", "verification_engine.py")
                 st.code(cmd, language="bash")
                 st.caption(
-                    "Copy this command to a machine with BTCRecover installed. "
+                    "Copy this command to a machine with the verification engine installed. "
                     "Replace `YOUR_WALLET_ADDRESS` with the client's address if not already set."
                 )
         close_box()

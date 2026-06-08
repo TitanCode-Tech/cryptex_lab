@@ -205,6 +205,30 @@ def write_temp_file(content: str | bytes, suffix: str = ".txt") -> str:
     return path
 
 
+def write_ram_temp_file(content: str | bytes, suffix: str = ".txt") -> str:
+    """Attempt to write a temp file on a RAM-backed filesystem (e.g. /dev/shm).
+
+    Falls back to the regular temp dir if no suitable ramfs is available.
+    Callers MUST delete the returned path after use.
+    """
+    ram_dirs = ["/dev/shm", "/run/shm", "/tmp"]
+    mode = "wb" if isinstance(content, bytes) else "w"
+    encoding = None if isinstance(content, bytes) else "utf-8"
+
+    for d in ram_dirs:
+        try:
+            if os.path.isdir(d) and os.access(d, os.W_OK | os.X_OK):
+                fd, path = tempfile.mkstemp(suffix=suffix, prefix="cx_btcr_", dir=d)
+                with os.fdopen(fd, mode, **({"encoding": encoding} if encoding else {})) as f:
+                    f.write(content)
+                return path
+        except Exception:
+            continue
+
+    # Last resort: system temp
+    return write_temp_file(content, suffix=suffix)
+
+
 # ---------------------------------------------------------------------------
 # Standard argv builders
 # ---------------------------------------------------------------------------
