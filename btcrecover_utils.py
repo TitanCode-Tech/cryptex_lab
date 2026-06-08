@@ -262,6 +262,48 @@ def seed_recovery_argv(
     return argv
 
 
+def seedlist_argv(
+    seedlist_path: str,
+    wallet_type: str = "bip39",
+    addrs: str = "",
+    language: str = "en",
+    mnemonic_length: int = 12,
+    addr_limit: int = 10,
+    extra_flags: list[str] | None = None,
+) -> list[str]:
+    """
+    Build seedrecover.py argv for --seedlist mode.
+
+    Used by the hybrid missing-word engine: Python generates all
+    checksum-valid candidates, writes them to a file, then BTCRecover
+    tests each one against the target address using multi-threaded BIP32.
+
+    Parameters
+    ----------
+    seedlist_path   : path to the file of candidate seeds (one per line).
+    wallet_type     : "bip39" | "electrum2" | "ethereum" | etc.
+    addrs           : space-separated target addresses.
+    language        : BIP39 wordlist language code ("en", "es", ...).
+    mnemonic_length : word count of the seeds in the list (12/15/18/21/24).
+    addr_limit      : addresses per derivation path to check.
+    extra_flags     : additional raw flags to append.
+    """
+    argv = list(_COMMON_FLAGS)
+    argv += ["--wallet-type", wallet_type]
+    argv += ["--seedlist", seedlist_path]
+    argv += ["--mnemonic-length", str(mnemonic_length)]
+    argv += ["--language", language]
+    argv += ["--addr-limit", str(addr_limit)]
+
+    if addrs.strip():
+        argv += ["--addrs"] + addrs.strip().split()
+
+    if extra_flags:
+        argv += extra_flags
+
+    return argv
+
+
 def wallet_attack_argv(
     wallet_path: str,
     tokenlist_path: str | None = None,

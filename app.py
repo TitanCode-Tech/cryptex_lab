@@ -1890,16 +1890,18 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                 ]
                 render_data_table(headers, rows)
                 space_color = "green" if search_space_estimate <= _SEARCH_SPACE_CAP else "red"
+                _engine_label = "HYBRID (Python + BTCRecover)" if _btcr.is_available() else "OFFLINE (MULTIPROCESSING)"
                 render_status_cards([
                     ("VARIABLE POSITIONS", str(len(pattern_info)), "orange"),
                     ("SEARCH SPACE", f"{search_space_estimate:,}", space_color),
-                    ("ENGINE", "OFFLINE (MULTIPROCESSING)", "green"),
+                    ("ENGINE", _engine_label, "green"),
                     ("LAST CHECKED", str(st.session_state.get("inc_last_checked", 0)), ""),
                 ])
             else:
+                _engine_label = "HYBRID (Python + BTCRecover)" if _btcr.is_available() else "OFFLINE (MULTIPROCESSING)"
                 render_status_cards([
                     ("VARIABLE POSITIONS", "0" if phrase.strip() else "—", ""),
-                    ("ENGINE", "OFFLINE (MULTIPROCESSING)", "green"),
+                    ("ENGINE", _engine_label, "green"),
                     ("MAX FULL UNKNOWNS (?)", str(MAX_MISSING_WORDS), ""),
                     ("LAST CHECKED", str(st.session_state.get("inc_last_checked", 0)), ""),
                 ])
@@ -1943,64 +1945,150 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                     st.warning("Phrase must contain at least one '?' or a partial pattern (e.g. 'aban*') to indicate unknown/partial words.")
                 else:
                     target_arg = target.strip() or None
+                    use_hybrid = bool(target_arg) and _btcr.is_available()
 
-                    log_event("info", f"Starting recovery — {len(pattern_info)} variable position(s) — address filter: {target_arg is not None}")
+                    log_event("info", f"Starting recovery — {len(pattern_info)} variable position(s) — hybrid={use_hybrid}")
 
-                    progress_bar = st.progress(0.0)
-                    status_text = st.empty()
+                    if use_hybrid:
+                        # ── Phase 1: fast Python checksum sweep (no address) ──
+                        cs_bar = st.progress(0.0)
+                        cs_status = st.empty()
 
-                    def update_progress(checked, total, found):
-                        pct = min(1.0, float(checked) / total)
-                        progress_bar.progress(pct)
-                        status_text.markdown(
-                            f"**Checked**: {checked:,} / {total:,} ({pct*100:.1f}%) | "
-                            f"**Candidates Found**: {found}"
+                        def _inc_cs_cb(checked, total, found):
+                            cs_bar.progress(min(1.0, checked / total))
+                            cs_status.markdown(
+                                f"**Phase 1 — Checksum sweep:** {checked:,} / {total:,} "
+                                f"· {found} valid"
+                            )
+
+                        with st.spinner("Phase 1: scanning checksum-valid candidates…"):
+                            try:
+                                cs_result = recover_missing_words(
+                                    phrase,
+                                    target_address=None,
+                                    max_unknowns=MAX_MISSING_WORDS,
+                                    progress_callback=_inc_cs_cb,
+                                )
+                            except ValueError as e:
+                                log_event("err", f"Recovery error: {e}")
+                                st.error(str(e))
+                                st.stop()
+
+                        st.session_state["inc_last_checked"] = cs_result["checked"]
+                        valid_seeds = cs_result["candidates"]
+                        cs_status.markdown(
+                            f"**Phase 1 complete** — {cs_result['checked']:,} checked · "
+                            f"**{len(valid_seeds)} checksum-valid** · {cs_result['elapsed_time']:.1f}s"
                         )
+                        render_status_cards([
+                            ("SEARCH SPACE", f"{cs_result.get('search_space', 0):,}", ""),
+                            ("CHECKED", f"{cs_result['checked']:,}", ""),
+                            ("CHECKSUM VALID", f"{len(valid_seeds)}", "green"),
+                            ("PHASE 1 TIME", f"{cs_result['elapsed_time']:.1f}s", ""),
+                        ])
 
-                    with st.spinner("Executing candidate search..."):
-                        try:
-                            result = recover_missing_words(
-                                phrase,
-                                target_address=target_arg,
-                                max_unknowns=MAX_MISSING_WORDS,
-                                progress_callback=update_progress,
-                            )
-                        except ValueError as e:
-                            log_event("err", f"Recovery error: {e}")
-                            st.error(str(e))
-                            st.stop()
-
-                    st.session_state["inc_last_checked"] = result["checked"]
-                    cand = result["candidates"]
-
-                    st.markdown("### Recovery Metrics")
-                    render_status_cards([
-                        ("SEARCH SPACE", f"{result.get('search_space', 0):,}", ""),
-                        ("TOTAL CHECKED", f"{result['checked']:,}", ""),
-                        ("CHECKSUM PASSED", f"{result['checksum_passed']:,}", "green"),
-                        ("SPEED", f"{int(result['checked'] / (result['elapsed_time'] or 0.001)):,} keys/s", ""),
-                    ])
-
-                    if cand:
-                        log_event("ok", f"Recovered {len(cand)} candidate(s) in {result['elapsed_time']:.2f}s")
-                        mode_label = "address-verified" if target_arg else "checksum-valid"
-                        st.success(f"Found {len(cand)} {mode_label} candidate phrase(s) in {result['elapsed_time']:.2f} seconds.")
-                        st.session_state["recovery_candidates"] = cand
-                        for c in cand[:10]:
-                            st.code(c, language="text")
-                        if result["truncated"]:
-                            st.warning("Result list truncated at 100 candidates.")
-                        if not target_arg and len(cand) > 1:
-                            st.info(
-                                f"{len(cand)} candidates returned (no address filter). "
-                                "Use the Address Generator or Address Matcher to identify the correct phrase."
-                            )
-                    else:
-                        log_event("warn", "No candidates produced")
-                        if target_arg:
-                            st.error("No candidates matched the target address. Verify the address and try without the address filter to see all checksum-valid options.")
+                        if not valid_seeds:
+                            st.error("No checksum-valid candidates found. Check your known words for typos.")
                         else:
-                            st.error("No checksum-valid candidates produced. Check that your known words are spelled correctly (run Typo Correction Lab).")
+                            # ── Phase 2: BTCRecover address verification ──────
+                            seedlist_path = None
+                            try:
+                                seedlist_path = _btcr.write_temp_file(
+                                    "\n".join(valid_seeds), suffix=".txt"
+                                )
+                                n_words = len(phrase.strip().split())
+                                argv = _btcr.seedlist_argv(
+                                    seedlist_path=seedlist_path,
+                                    wallet_type="bip39",
+                                    addrs=target_arg,
+                                    language="en",
+                                    mnemonic_length=n_words,
+                                    addr_limit=10,
+                                )
+                                output_ph = st.empty()
+                                output_buf: list[str] = []
+
+                                def _inc_btcr_line(line: str) -> None:
+                                    output_buf.append(line)
+                                    output_ph.code("\n".join(output_buf[-20:]), language="text")
+
+                                with st.spinner(f"Phase 2: verifying {len(valid_seeds)} candidate(s) against address…"):
+                                    hw_result = _btcr.run_btcrseed(argv, line_callback=_inc_btcr_line)
+                            finally:
+                                if seedlist_path and os.path.exists(seedlist_path):
+                                    os.unlink(seedlist_path)
+
+                            if hw_result["found"] and hw_result["result"]:
+                                log_event("ok", "Recovery: seed confirmed")
+                                st.success("WALLET SEED FOUND")
+                                st.code(hw_result["result"], language="text")
+                                st.session_state["recovery_candidates"] = [hw_result["result"]]
+                            elif hw_result["error"]:
+                                log_event("err", f"BTCRecover error: {hw_result['error']}")
+                                st.error(f"Phase 2 error: {hw_result['error']}")
+                            else:
+                                log_event("warn", "No candidate matched the address")
+                                st.warning(
+                                    f"None of the {len(valid_seeds)} checksum-valid candidates "
+                                    "matched the address. Verify the address is correct and "
+                                    "the known words have no typos."
+                                )
+                    else:
+                        # ── Pure Python path (no address, or BTCRecover absent) ──
+                        progress_bar = st.progress(0.0)
+                        status_text = st.empty()
+
+                        def update_progress(checked, total, found):
+                            pct = min(1.0, float(checked) / total)
+                            progress_bar.progress(pct)
+                            status_text.markdown(
+                                f"**Checked**: {checked:,} / {total:,} ({pct*100:.1f}%) | "
+                                f"**Candidates Found**: {found}"
+                            )
+
+                        with st.spinner("Searching…"):
+                            try:
+                                result = recover_missing_words(
+                                    phrase,
+                                    target_address=target_arg,
+                                    max_unknowns=MAX_MISSING_WORDS,
+                                    progress_callback=update_progress,
+                                )
+                            except ValueError as e:
+                                log_event("err", f"Recovery error: {e}")
+                                st.error(str(e))
+                                st.stop()
+
+                        st.session_state["inc_last_checked"] = result["checked"]
+                        cand = result["candidates"]
+
+                        render_status_cards([
+                            ("SEARCH SPACE", f"{result.get('search_space', 0):,}", ""),
+                            ("TOTAL CHECKED", f"{result['checked']:,}", ""),
+                            ("CHECKSUM PASSED", f"{result['checksum_passed']:,}", "green"),
+                            ("SPEED", f"{int(result['checked'] / (result['elapsed_time'] or 0.001)):,} keys/s", ""),
+                        ])
+
+                        if cand:
+                            log_event("ok", f"Recovered {len(cand)} candidate(s) in {result['elapsed_time']:.2f}s")
+                            mode_label = "address-verified" if target_arg else "checksum-valid"
+                            st.success(f"Found {len(cand)} {mode_label} candidate(s) in {result['elapsed_time']:.2f}s.")
+                            st.session_state["recovery_candidates"] = cand
+                            for c in cand[:10]:
+                                st.code(c, language="text")
+                            if result["truncated"]:
+                                st.warning("Result list truncated at 100 candidates.")
+                            if not target_arg and len(cand) > 1:
+                                st.info(
+                                    f"{len(cand)} checksum-valid candidates returned. "
+                                    "Enter a wallet address above to identify the correct one."
+                                )
+                        else:
+                            log_event("warn", "No candidates produced")
+                            if target_arg:
+                                st.error("No candidates matched the target address. Verify the address and try without it to see all checksum-valid options.")
+                            else:
+                                st.error("No checksum-valid candidates produced. Check your known words for typos.")
             close_box()
 
         # ── Tab 2: Extra Word Removal ──────────────────────────────────────
@@ -2119,15 +2207,9 @@ You may mix `?` and partial patterns freely. The total search space (product of 
             if not _btcr.is_available():
                 st.error(
                     f"BTCRecover not found at `{_btcr.BTCRECOVER_DIR}`. "
-                    "Download it from https://github.com/3rdIteration/btcrecover and update "
-                    "`BTCRECOVER_DIR` in `btcrecover_utils.py`."
+                    "Ensure the bundled btcrecover/ directory is present."
                 )
             else:
-                st.markdown(
-                    "Use BTCRecover's native engine for advanced seed recovery — "
-                    "keyboard typos, phonetic substitutions, entirely different words, "
-                    "and word-swap detection. Complements the native recovery tabs above."
-                )
                 render_status_cards([
                     ("ENGINE", "BTCRecover 1.13 subprocess", "green"),
                     ("HARDWARE", "CPU · Offline", "green"),
@@ -2136,18 +2218,21 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                 ])
                 st.divider()
 
-                br_mnemonic = st.text_area(
-                    "KNOWN MNEMONIC (with typos / partial words)",
-                    value="",
-                    key="br_mnemonic",
-                    height=100,
-                    placeholder="Enter all words as remembered — typos are OK",
+                br_mode = st.radio(
+                    "MODE",
+                    ["MISSING WORDS (hybrid)", "TYPO CORRECTION"],
+                    key="br_mode",
+                    horizontal=True,
+                    help=(
+                        "MISSING WORDS: Python finds all checksum-valid candidates fast, "
+                        "then BTCRecover verifies against your address — much faster than "
+                        "pure Python for address-verified searches.\n\n"
+                        "TYPO CORRECTION: BTCRecover tries keyboard/phonetic substitutions "
+                        "and entirely-different-word replacements."
+                    ),
                 )
-                br_addr = st.text_input(
-                    "TARGET WALLET ADDRESS (highly recommended)",
-                    key="br_addr",
-                    placeholder="bc1q...  or  1...  or  3...  or  0x...",
-                )
+                st.divider()
+
                 br_lang = st.selectbox(
                     "WORDLIST LANGUAGE",
                     ["en", "es", "fr", "it", "ja", "ko", "pt", "zh-hans", "zh-hant", "cs"],
@@ -2155,71 +2240,197 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                 )
                 br_wallet_type = st.selectbox(
                     "WALLET TYPE",
-                    ["bip39", "electrum2"],
+                    ["bip39", "electrum2", "ethereum"],
                     key="br_wallet_type",
                 )
-
-                c1, c2 = st.columns(2)
-                with c1:
-                    br_typos = st.number_input(
-                        "KEYBOARD TYPOS (--typos)",
-                        min_value=0, max_value=4, value=1, key="br_typos",
-                        help="Max number of keyboard/phonetic mistakes to correct.",
-                    )
-                with c2:
-                    br_big_typos = st.number_input(
-                        "DIFFERENT WORDS (--big-typos)",
-                        min_value=0, max_value=2, value=0, key="br_big_typos",
-                        help="Max number of entirely wrong words (tries all 2048 BIP39 words at each position).",
-                    )
-
                 br_addr_limit = st.number_input(
                     "ADDRESSES TO CHECK PER PATH",
                     min_value=1, max_value=50, value=10, key="br_addr_limit",
                 )
 
-                if _btn("RUN BTCRECOVER SEED RECOVERY", key="br_run", variant="orange"):
-                    if not br_mnemonic.strip():
-                        st.warning("Enter the mnemonic first.")
-                    elif not br_addr.strip():
-                        st.warning("A target address is strongly recommended — without it BTCRecover cannot confirm correctness.")
-                    else:
-                        argv = _btcr.seed_recovery_argv(
-                            mnemonic=br_mnemonic.strip(),
-                            wallet_type=br_wallet_type,
-                            addrs=br_addr.strip(),
-                            language=br_lang,
-                            typos=int(br_typos),
-                            big_typos=int(br_big_typos),
-                            addr_limit=int(br_addr_limit),
+                if br_mode == "MISSING WORDS (hybrid)":
+                    st.markdown(
+                        "**How it works:** Mark unknown word positions with `?`. "
+                        "Python scans all ~4.2M combinations and filters to checksum-valid "
+                        "candidates in seconds. BTCRecover then verifies each candidate "
+                        "against your address using multi-threaded BIP32 — far faster than "
+                        "pure-Python address derivation."
+                    )
+                    br_hw_mnemonic = st.text_area(
+                        "MNEMONIC — use '?' for unknown positions",
+                        value="",
+                        key="br_hw_mnemonic",
+                        height=100,
+                        placeholder="abandon ? abandon abandon abandon abandon abandon abandon abandon abandon abandon ?",
+                    )
+                    br_hw_addr = st.text_input(
+                        "TARGET WALLET ADDRESS (required)",
+                        key="br_hw_addr",
+                        placeholder="bc1q...  or  1...  or  3...  or  0x...",
+                    )
+
+                    if _btn("RUN HYBRID RECOVERY", key="br_hw_run", variant="orange"):
+                        if not br_hw_mnemonic.strip():
+                            st.warning("Enter the mnemonic with '?' markers first.")
+                        elif not br_hw_addr.strip():
+                            st.error("A target address is required for the hybrid engine.")
+                        else:
+                            n_unknowns = br_hw_mnemonic.strip().lower().split().count("?")
+                            if n_unknowns == 0:
+                                st.warning("No '?' positions found — use TYPO CORRECTION mode instead.")
+                            else:
+                                # ── Step 1: Python checksum sweep ──────────────
+                                log_event("info", f"Hybrid recovery — {n_unknowns} unknown(s) — phase 1: checksum sweep")
+                                cs_bar = st.progress(0.0)
+                                cs_status = st.empty()
+
+                                def _cs_cb(checked, total, found):
+                                    cs_bar.progress(min(1.0, checked / total))
+                                    cs_status.markdown(
+                                        f"**Phase 1 — Checksum sweep:** {checked:,} / {total:,} "
+                                        f"checked · {found} valid"
+                                    )
+
+                                with st.spinner("Phase 1: scanning checksum-valid candidates…"):
+                                    try:
+                                        cs_result = recover_missing_words(
+                                            br_hw_mnemonic.strip(),
+                                            target_address=None,
+                                            max_unknowns=MAX_MISSING_WORDS,
+                                            progress_callback=_cs_cb,
+                                        )
+                                    except ValueError as e:
+                                        st.error(str(e))
+                                        st.stop()
+
+                                valid_seeds = cs_result["candidates"]
+                                cs_status.markdown(
+                                    f"**Phase 1 complete** — {cs_result['checked']:,} checked · "
+                                    f"**{len(valid_seeds)} checksum-valid candidate(s)** found "
+                                    f"in {cs_result['elapsed_time']:.1f}s"
+                                )
+
+                                if not valid_seeds:
+                                    st.error("No checksum-valid candidates found. Check your known words for typos.")
+                                else:
+                                    # ── Step 2: BTCRecover address verification ──
+                                    log_event("info", f"Hybrid recovery — phase 2: BTCRecover verifying {len(valid_seeds)} candidate(s)")
+                                    seedlist_path = None
+                                    try:
+                                        seedlist_content = "\n".join(valid_seeds)
+                                        seedlist_path = _btcr.write_temp_file(seedlist_content, suffix=".txt")
+
+                                        n_words = len(br_hw_mnemonic.strip().split())
+                                        argv = _btcr.seedlist_argv(
+                                            seedlist_path=seedlist_path,
+                                            wallet_type=br_wallet_type,
+                                            addrs=br_hw_addr.strip(),
+                                            language=br_lang,
+                                            mnemonic_length=n_words,
+                                            addr_limit=int(br_addr_limit),
+                                        )
+
+                                        output_ph = st.empty()
+                                        output_buf: list[str] = []
+
+                                        def _hw_line(line: str) -> None:
+                                            output_buf.append(line)
+                                            output_ph.code("\n".join(output_buf[-30:]), language="text")
+
+                                        with st.spinner(f"Phase 2: BTCRecover verifying {len(valid_seeds)} candidate(s)…"):
+                                            hw_result = _btcr.run_btcrseed(argv, line_callback=_hw_line)
+
+                                    finally:
+                                        if seedlist_path and os.path.exists(seedlist_path):
+                                            os.unlink(seedlist_path)
+
+                                    if hw_result["found"] and hw_result["result"]:
+                                        log_event("ok", "Hybrid recovery: seed found")
+                                        st.success("SEED FOUND")
+                                        st.code(hw_result["result"], language="text")
+                                        st.session_state["recovery_candidates"] = [hw_result["result"]]
+                                    elif hw_result["error"]:
+                                        log_event("err", f"Hybrid recovery error: {hw_result['error']}")
+                                        st.error(f"BTCRecover error: {hw_result['error']}")
+                                    else:
+                                        log_event("warn", "Hybrid recovery: no match found")
+                                        st.warning(
+                                            f"None of the {len(valid_seeds)} checksum-valid candidates "
+                                            "matched the target address. Verify the address is correct "
+                                            "and the known words have no typos."
+                                        )
+
+                else:  # TYPO CORRECTION mode
+                    st.markdown(
+                        "BTCRecover tries keyboard-adjacent substitutions, phonetic matches, "
+                        "and entirely-different-word replacements against your target address."
+                    )
+                    br_mnemonic = st.text_area(
+                        "KNOWN MNEMONIC (with typos)",
+                        value="",
+                        key="br_mnemonic",
+                        height=100,
+                        placeholder="Enter all words as remembered — typos are OK",
+                    )
+                    br_addr = st.text_input(
+                        "TARGET WALLET ADDRESS (highly recommended)",
+                        key="br_addr",
+                        placeholder="bc1q...  or  1...  or  3...  or  0x...",
+                    )
+
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        br_typos = st.number_input(
+                            "KEYBOARD TYPOS (--typos)",
+                            min_value=0, max_value=4, value=1, key="br_typos",
+                            help="Max number of keyboard/phonetic mistakes to correct.",
+                        )
+                    with c2:
+                        br_big_typos = st.number_input(
+                            "DIFFERENT WORDS (--big-typos)",
+                            min_value=0, max_value=2, value=0, key="br_big_typos",
+                            help="Max number of entirely wrong words.",
                         )
 
-                        log_event("info", f"BTCRecover seed recovery — typos={br_typos} big={br_big_typos}")
-
-                        output_ph = st.empty()
-                        output_buf: list[str] = []
-
-                        def _on_line(line: str) -> None:
-                            output_buf.append(line)
-                            output_ph.code("\n".join(output_buf[-40:]), language="text")
-
-                        with st.spinner("BTCRecover running..."):
-                            br_result = _btcr.run_btcrseed(argv, line_callback=_on_line)
-
-                        if br_result["found"] and br_result["result"]:
-                            log_event("ok", "BTCRecover: seed found")
-                            st.success("SEED FOUND")
-                            st.code(br_result["result"], language="text")
-                            st.session_state["recovery_candidates"] = [br_result["result"]]
-                        elif br_result["error"]:
-                            log_event("err", f"BTCRecover error: {br_result['error']}")
-                            st.error(f"Error: {br_result['error']}")
+                    if _btn("RUN BTCRECOVER", key="br_run", variant="orange"):
+                        if not br_mnemonic.strip():
+                            st.warning("Enter the mnemonic first.")
                         else:
-                            log_event("warn", "BTCRecover: seed not found")
-                            st.error(
-                                "Seed not found. Try increasing typos, enabling big-typos, "
-                                "or verifying the target address is correct."
+                            argv = _btcr.seed_recovery_argv(
+                                mnemonic=br_mnemonic.strip(),
+                                wallet_type=br_wallet_type,
+                                addrs=br_addr.strip(),
+                                language=br_lang,
+                                typos=int(br_typos),
+                                big_typos=int(br_big_typos),
+                                addr_limit=int(br_addr_limit),
                             )
+                            log_event("info", f"BTCRecover typo recovery — typos={br_typos} big={br_big_typos}")
+
+                            output_ph = st.empty()
+                            output_buf: list[str] = []
+
+                            def _on_line(line: str) -> None:
+                                output_buf.append(line)
+                                output_ph.code("\n".join(output_buf[-40:]), language="text")
+
+                            with st.spinner("BTCRecover running..."):
+                                br_result = _btcr.run_btcrseed(argv, line_callback=_on_line)
+
+                            if br_result["found"] and br_result["result"]:
+                                log_event("ok", "BTCRecover: seed found")
+                                st.success("SEED FOUND")
+                                st.code(br_result["result"], language="text")
+                                st.session_state["recovery_candidates"] = [br_result["result"]]
+                            elif br_result["error"]:
+                                log_event("err", f"BTCRecover error: {br_result['error']}")
+                                st.error(f"Error: {br_result['error']}")
+                            else:
+                                log_event("warn", "BTCRecover: seed not found")
+                                st.error(
+                                    "Seed not found. Try increasing typos, enabling big-typos, "
+                                    "or verifying the target address."
+                                )
 
             close_box()
 
