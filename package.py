@@ -15,11 +15,18 @@ Output (dist/):
   cryptex_lab_client_compiled.zip     -- compiled/protected client package (send this)
 """
 
+import base64
+import hashlib
+import json
 import os
 import subprocess
 import sys
 import zipfile
 from pathlib import Path
+
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 # ---------------------------------------------------------------------------
 # File manifests
@@ -120,6 +127,52 @@ def add_dir(zipf: zipfile.ZipFile, dirpath: str | Path, archive_prefix: str = ""
             zipf.write(file, archive_name)
 
 
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(4096):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _manifest_key_for_path(path: Path) -> str:
+    try:
+        if path.resolve().parent == COMPILED_DIR.resolve():
+            return path.name
+    except Exception:
+        pass
+    return str(path)
+
+
+def _load_private_key(path: Path):
+    with open(path, "rb") as f:
+        return load_pem_private_key(f.read(), password=None)
+
+
+def _write_signed_manifest(manifest_path: Path, file_paths: list[Path], private_key_path: Path) -> None:
+    if not private_key_path.exists():
+        print("ERROR: private_key.pem not found. Generate keys with python generate_keys.py first.")
+        sys.exit(1)
+
+    hashes_dict: dict[str, str] = {}
+    for file_path in file_paths:
+        if not file_path.exists():
+            print(f"ERROR: required file for manifest missing: {file_path}")
+            sys.exit(1)
+        hashes_dict[_manifest_key_for_path(file_path)] = sha256_file(file_path)
+
+    private_key = _load_private_key(private_key_path)
+    hashes_bytes = json.dumps(hashes_dict, sort_keys=True).encode("utf-8")
+    signature = private_key.sign(hashes_bytes, padding.PKCS1v15(), hashes.SHA256())
+    manifest_content = {
+        "hashes": hashes_dict,
+        "signature": base64.b64encode(signature).decode("utf-8"),
+    }
+
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest_content, f, indent=2)
+
+
 # ---------------------------------------------------------------------------
 # Build modes
 # ---------------------------------------------------------------------------
@@ -173,6 +226,10 @@ def build_compiled(dist_dir: Path) -> None:
         print(f"ERROR: no compiled extensions found in {COMPILED_DIR}/")
         sys.exit(1)
 
+    manifest_temp = dist_dir / "compiled_manifest.json"
+    manifest_files = [Path(m) for m in PLAIN_MODULES] + compiled_exts
+    _write_signed_manifest(manifest_temp, manifest_files, Path("private_key.pem"))
+
     client_zip = dist_dir / "cryptex_lab_client_compiled.zip"
     print(f"\nStep 2: Creating compiled client package: {client_zip}")
     with zipfile.ZipFile(client_zip, "w", zipfile.ZIP_DEFLATED) as zipf:
@@ -183,11 +240,17 @@ def build_compiled(dist_dir: Path) -> None:
         # Remaining modules as plain Python
         for m in PLAIN_MODULES:
             add_file(zipf, m, m)
-        # Support files
+        # Support files — skip the repo manifest.json; we ship a freshly signed one
         for f in CLIENT_SUPPORT_FILES:
+            if f == "manifest.json":
+                continue
             add_file(zipf, f, f)
         for d in CLIENT_DIRS:
             add_dir(zipf, d)
+        zipf.write(manifest_temp, "manifest.json")
+        print(f"  + manifest.json  (signed package manifest)")
+
+    manifest_temp.unlink(missing_ok=True)
     print(f"\n  Done. {client_zip.stat().st_size:,} bytes")
     print(f"\nProduction package ready: {client_zip}")
     print("Send this to the client. The 4 security modules ship as compiled binaries.")
