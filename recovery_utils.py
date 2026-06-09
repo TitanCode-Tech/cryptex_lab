@@ -293,6 +293,33 @@ def _first_address_matches(mnemonic: str, target_address: str) -> bool:
     return result.get("match") is not None
 
 
+def _address_starts_with(mnemonic: str, prefix: str) -> bool:
+    """
+    Return True if the first derived address for `mnemonic` starts with
+    `prefix` (case-insensitive).
+
+    Detects the address type from the prefix so only one derivation is done:
+      "0x..."  → ETH (BIP44)
+      "bc1..."  → BTC native SegWit (BIP84)
+      "3..."    → BTC SegWit P2SH (BIP49)
+      anything else → BTC legacy P2PKH (BIP44)
+    """
+    try:
+        from derivation_utils import scan_standard_paths
+        pfx = prefix.strip().lower()
+        if pfx.startswith("0x"):
+            rows = scan_standard_paths(mnemonic, "ETH", count=1)
+        elif pfx.startswith("bc1"):
+            rows = scan_standard_paths(mnemonic, "BTC", count=1, btc_address_type="native_segwit")
+        elif pfx.startswith("3"):
+            rows = scan_standard_paths(mnemonic, "BTC", count=1, btc_address_type="segwit")
+        else:
+            rows = scan_standard_paths(mnemonic, "BTC", count=1, btc_address_type="legacy")
+        return bool(rows) and rows[0]["address"].lower().startswith(pfx)
+    except Exception:
+        return False
+
+
 def _derive_candidate_worker(args: tuple) -> dict:
     """Multiprocessing worker: derive first address for each requested coin from a seed."""
     mnemonic, coins = args
@@ -369,8 +396,9 @@ def _recover_chunk_worker(args) -> dict:
       target_address       – optional address filter (None = no filter)
       word_index_map       – {word: bip39_index} for fast checksum (no bip_utils)
       n_words              – total word count (12/15/18/21/24)
+      addr_prefix          – optional address prefix filter (e.g. "1Bc", "0x3a")
     """
-    words, variable_positions, first_word_chunk, remaining_cands_list, target_address, word_index_map, n_words = args
+    words, variable_positions, first_word_chunk, remaining_cands_list, target_address, word_index_map, n_words, addr_prefix = args
     candidates = []
     checked = 0
     checksum_passed = 0
@@ -389,7 +417,13 @@ def _recover_chunk_worker(args) -> dict:
         if _bip39_fast_checksum_valid(idx_arr, n_words):
             checksum_passed += 1
             candidate = " ".join(trial_words)
-            if target_address is None or _first_address_matches(candidate, target_address):
+            if target_address is not None:
+                if _first_address_matches(candidate, target_address):
+                    candidates.append(candidate)
+            elif addr_prefix is not None:
+                if _address_starts_with(candidate, addr_prefix):
+                    candidates.append(candidate)
+            else:
                 candidates.append(candidate)
 
     for w0 in first_word_chunk:
@@ -524,6 +558,7 @@ def estimate_recovery_time(
 def recover_missing_words(
     mnemonic_with_q: str,
     target_address: str | None = None,
+    addr_prefix: str | None = None,
     max_unknowns: int = 2,
     progress_callback: Callable[[int, int, int], None] | None = None,
     max_returned: int = _MAX_RETURNED_CANDIDATES,
@@ -589,6 +624,9 @@ def recover_missing_words(
         candidates = [" ".join(words)] if v["valid"] else []
         if candidates and target_address is not None:
             if not _first_address_matches(candidates[0], target_address):
+                candidates = []
+        elif candidates and addr_prefix is not None:
+            if not _address_starts_with(candidates[0], addr_prefix):
                 candidates = []
         return {
             "candidates": candidates,
@@ -665,7 +703,7 @@ def recover_missing_words(
     chunks = [pos0_candidates[i:i + chunk_size] for i in range(0, len(pos0_candidates), chunk_size)]
     for chunk in chunks:
         task = (words, variable_positions, chunk, remaining_cands_list,
-                target_address, word_index_map, n_words)
+                target_address, word_index_map, n_words, addr_prefix)
         res = _recover_chunk_worker(task)
         checked_count += res["checked"]
         checksum_passed_count += res["checksum_passed"]

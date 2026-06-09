@@ -1956,22 +1956,23 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                 _wl_sorted = sorted(_english_wordlist())
 
                 # ── paste / auto-detect ────────────────────────────────────
-                _paste_val = st.text_input(
+                def _on_paste_change():
+                    _raw = st.session_state.get("inc_grid_paste", "")
+                    _pw = _raw.strip().lower().split()
+                    if len(_pw) > 1:
+                        _dlen = len(_pw) if len(_pw) in [12, 15, 18, 21, 24] else None
+                        if _dlen:
+                            st.session_state["inc_grid_wcount"] = _dlen
+                        for _wi in range(24):
+                            st.session_state[f"inc_grid_w{_wi}"] = _pw[_wi] if _wi < len(_pw) else ""
+                    del st.session_state["inc_grid_paste"]
+
+                st.text_input(
                     "PASTE PHRASE — auto-fills all slots",
                     key="inc_grid_paste",
                     placeholder="Paste your full mnemonic here to auto-fill the word slots…",
+                    on_change=_on_paste_change,
                 )
-                if _paste_val.strip():
-                    _pw = _paste_val.strip().lower().split()
-                    if len(_pw) > 1:
-                        _detected_len = len(_pw) if len(_pw) in [12, 15, 18, 21, 24] else None
-                        if _detected_len:
-                            st.session_state["inc_grid_wcount"] = _detected_len
-                        _fill_count = _detected_len or st.session_state.get("inc_grid_wcount", 12)
-                        for _wi in range(24):
-                            st.session_state[f"inc_grid_w{_wi}"] = _pw[_wi] if _wi < len(_pw) else ""
-                        st.session_state["inc_grid_paste"] = ""
-                        st.rerun()
 
                 _word_count = st.select_slider(
                     "PHRASE LENGTH",
@@ -2311,7 +2312,12 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                             _term_lines2.append(f"[{ts}] {msg}")
                             _term_ph2.code("\n".join(_term_lines2[-40:]), language="text")
 
-                        _mode_str = "Checksum sweep — no address filter" if not target_arg else "Checksum + address match (Python)"
+                        if target_arg:
+                            _mode_str = "Checksum + address match"
+                        elif addr_prefix_arg:
+                            _mode_str = f"Checksum + prefix filter ({addr_prefix_arg})"
+                        else:
+                            _mode_str = "Checksum sweep — no address filter"
                         _tlog2("Cryptex Recovery Engine — PYTHON MODE")
                         _tlog2(f"Mode     : {_mode_str}")
                         _tlog2(f"Unknown  : {len(pattern_info)} position(s)  |  Search space: {search_space_estimate:,}")
@@ -2331,9 +2337,12 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                             result = recover_missing_words(
                                 phrase,
                                 target_address=target_arg,
+                                addr_prefix=addr_prefix_arg or None,
                                 max_unknowns=MAX_MISSING_WORDS,
                                 progress_callback=_py_cb,
-                                max_returned=_MAX_RETURNED_CANDIDATES,
+                                # No cap for address/prefix modes — sweep the full space.
+                                # Cap for no-address mode to avoid overwhelming results.
+                                max_returned=0 if (target_arg or addr_prefix_arg) else _MAX_RETURNED_CANDIDATES,
                             )
                         except ValueError as e:
                             log_event("err", f"Recovery error: {e}")
@@ -2361,32 +2370,35 @@ You may mix `?` and partial patterns freely. The total search space (product of 
 
                         if cand:
                             log_event("ok", f"Recovered {len(cand)} candidate(s) in {result['elapsed_time']:.2f}s")
-                            mode_label = "address-verified" if target_arg else "checksum-valid"
+                            if target_arg:
+                                mode_label = "address-verified"
+                            elif addr_prefix_arg:
+                                mode_label = f"prefix-matched ({addr_prefix_arg})"
+                            else:
+                                mode_label = "checksum-valid"
                             st.success(f"Found {len(cand)} {mode_label} candidate(s) in {result['elapsed_time']:.2f}s.")
                             st.session_state["recovery_candidates"] = cand
 
                             if target_arg:
+                                # Exact address match — show seed + inspector
                                 for i, c in enumerate(cand[:10]):
                                     st.code(c, language="text")
                                     if i < 5:
                                         render_seed_inspector(c, key_prefix=f"inc_si_py_{i}")
-                            elif addr_prefix_arg or not target_arg:
-                                # Prefix-filter mode OR no-address auto-derive mode
-                                # Detect which coins to derive based on prefix shape
-                                if addr_prefix_arg:
-                                    pfx = addr_prefix_arg.lower()
-                                    if pfx.startswith("0x"):
-                                        _derive_coins = ["ETH"]
-                                    elif pfx.startswith("bc1"):
-                                        _derive_coins = ["BTC_native"]
-                                    elif pfx.startswith("3"):
-                                        _derive_coins = ["BTC_segwit"]
-                                    elif pfx.startswith("1"):
-                                        _derive_coins = ["BTC_legacy"]
-                                    else:
-                                        _derive_coins = ["ETH", "BTC_native", "BTC_legacy"]
+                            elif addr_prefix_arg:
+                                # Prefix mode — candidates already filtered inline during sweep.
+                                # Derive full addresses for display only.
+                                pfx = addr_prefix_arg.lower()
+                                if pfx.startswith("0x"):
+                                    _derive_coins = ["ETH"]
+                                elif pfx.startswith("bc1"):
+                                    _derive_coins = ["BTC_native"]
+                                elif pfx.startswith("3"):
+                                    _derive_coins = ["BTC_segwit"]
+                                elif pfx.startswith("1"):
+                                    _derive_coins = ["BTC_legacy"]
                                 else:
-                                    _derive_coins = ["ETH", "BTC_native"]
+                                    _derive_coins = ["ETH", "BTC_native", "BTC_legacy"]
 
                                 _coin_labels = {
                                     "ETH": "ETH Address (m/44'/60'/0'/0/0)",
@@ -2397,43 +2409,25 @@ You may mix `?` and partial patterns freely. The total search space (product of 
 
                                 _d_ph = st.empty()
                                 _d_bar = st.progress(0.0)
-                                _d_ph.info(
-                                    f"Deriving addresses for {len(cand):,} candidates "
-                                    f"({', '.join(_coin_labels[c] for c in _derive_coins)})…"
-                                )
+                                _d_ph.info(f"Deriving full addresses for {len(cand)} matched candidate(s)…")
 
                                 def _derive_cb(done, total):
                                     pct = done / max(total, 1)
                                     _d_bar.progress(pct)
-                                    _d_ph.info(
-                                        f"Deriving addresses… {done:,} / {total:,}  ({pct*100:.1f}%)"
-                                    )
+                                    _d_ph.info(f"Deriving addresses… {done} / {total}")
 
                                 _derived = derive_addresses_bulk(
                                     cand,
                                     coins=_derive_coins,
-                                    addr_prefix=addr_prefix_arg,
                                     progress_callback=_derive_cb,
                                 )
                                 _d_bar.empty()
                                 _d_ph.empty()
 
                                 if not _derived:
-                                    st.error(
-                                        f"No candidates produced an address starting with "
-                                        f"'{addr_prefix_arg}'. Check the prefix and try again, "
-                                        "or switch to 'Without Wallet Address' mode to see all."
-                                    )
+                                    st.error("No candidates found. Try a shorter prefix or check your known words for typos.")
                                 else:
-                                    if addr_prefix_arg:
-                                        st.success(
-                                            f"Found {len(_derived)} candidate(s) matching prefix '{addr_prefix_arg}'."
-                                        )
-                                    else:
-                                        st.success(
-                                            f"Address derivation complete — {len(_derived):,} candidates."
-                                        )
-                                    # Build display table
+                                    st.success(f"Found {len(_derived)} candidate(s) matching prefix '{addr_prefix_arg}'.")
                                     _headers = ["SEED PHRASE"] + [_coin_labels[c] for c in _derive_coins]
                                     _rows = [
                                         [r["seed"]] + [r.get(c, "—") for c in _derive_coins]
@@ -2444,13 +2438,44 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                                     if len(_derived) <= 5:
                                         for _di, _dr in enumerate(_derived):
                                             render_seed_inspector(_dr["seed"], key_prefix=f"inc_si_der_{_di}")
+                            else:
+                                # No-address mode — derive ETH + BTC for all candidates
+                                _derive_coins = ["ETH", "BTC_native"]
+                                _coin_labels = {
+                                    "ETH": "ETH Address (m/44'/60'/0'/0/0)",
+                                    "BTC_native": "BTC Native SegWit (m/84'/0'/0'/0/0)",
+                                }
+                                _d_ph = st.empty()
+                                _d_bar = st.progress(0.0)
+                                _d_ph.info(f"Deriving addresses for {len(cand)} candidates…")
+
+                                def _derive_cb2(done, total):
+                                    pct = done / max(total, 1)
+                                    _d_bar.progress(pct)
+                                    _d_ph.info(f"Deriving addresses… {done} / {total}")
+
+                                _derived2 = derive_addresses_bulk(cand, coins=_derive_coins, progress_callback=_derive_cb2)
+                                _d_bar.empty()
+                                _d_ph.empty()
+                                _headers = ["SEED PHRASE"] + [_coin_labels[c] for c in _derive_coins]
+                                _rows = [
+                                    [r["seed"]] + [r.get(c, "—") for c in _derive_coins]
+                                    for r in _derived2
+                                ]
+                                render_data_table(_headers, _rows)
+                                st.session_state["recovery_candidates"] = [r["seed"] for r in _derived2]
+                                if len(_derived2) <= 5:
+                                    for _di, _dr in enumerate(_derived2):
+                                        render_seed_inspector(_dr["seed"], key_prefix=f"inc_si_der_{_di}")
 
                             if result["truncated"]:
-                                st.warning("Result list truncated — switch to 'With Known Wallet Address' mode and enter the address for a precise match.")
+                                st.warning("Result list truncated — provide a wallet address or prefix for a precise match.")
                         else:
                             log_event("warn", "No candidates produced")
                             if target_arg:
                                 st.error("No candidates matched the target address. Verify the address and try without it to see all checksum-valid options.")
+                            elif addr_prefix_arg:
+                                st.error(f"No candidates found with prefix '{addr_prefix_arg}'. Try a shorter prefix or check your known words for typos.")
                             else:
                                 st.error("No checksum-valid candidates produced. Check your known words for typos.")
             close_box()
