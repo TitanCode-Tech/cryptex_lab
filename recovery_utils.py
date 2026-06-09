@@ -294,6 +294,76 @@ def _first_address_matches(mnemonic: str, target_address: str) -> bool:
     return result.get("match") is not None
 
 
+def _derive_candidate_worker(args: tuple) -> dict:
+    """Multiprocessing worker: derive first address for each requested coin from a seed."""
+    mnemonic, coins = args
+    out: dict = {"seed": mnemonic}
+    try:
+        from derivation_utils import scan_standard_paths
+        for coin_key in coins:
+            if coin_key == "ETH":
+                rows = scan_standard_paths(mnemonic, "ETH", count=1)
+                out["ETH"] = rows[0]["address"] if rows else "—"
+            elif coin_key == "BTC_native":
+                rows = scan_standard_paths(mnemonic, "BTC", count=1, btc_address_type="native_segwit")
+                out["BTC_native"] = rows[0]["address"] if rows else "—"
+            elif coin_key == "BTC_legacy":
+                rows = scan_standard_paths(mnemonic, "BTC", count=1, btc_address_type="legacy")
+                out["BTC_legacy"] = rows[0]["address"] if rows else "—"
+            elif coin_key == "BTC_segwit":
+                rows = scan_standard_paths(mnemonic, "BTC", count=1, btc_address_type="segwit")
+                out["BTC_segwit"] = rows[0]["address"] if rows else "—"
+    except Exception:
+        for c in coins:
+            out.setdefault(c, "—")
+    return out
+
+
+def derive_addresses_bulk(
+    candidates: list[str],
+    coins: list[str] | None = None,
+    addr_prefix: str | None = None,
+    progress_callback=None,
+    n_workers: int | None = None,
+) -> list[dict]:
+    """
+    Derive addresses for a list of seed candidates using multiprocessing.
+
+    coins: one or more of "ETH", "BTC_native", "BTC_legacy", "BTC_segwit".
+           Defaults to ["ETH", "BTC_native"].
+    addr_prefix: if provided, keep only rows where any derived address starts
+                 with this string (case-insensitive).
+    progress_callback: called as callback(done, total) every ~500 items.
+    Returns list of dicts with keys "seed" + one per requested coin.
+    """
+    import multiprocessing as mp
+
+    if coins is None:
+        coins = ["ETH", "BTC_native"]
+
+    workers = n_workers or max(1, mp.cpu_count() - 1)
+    args_list = [(m, coins) for m in candidates]
+    results: list[dict] = []
+    total = len(args_list)
+
+    with mp.Pool(workers) as pool:
+        for i, res in enumerate(
+            pool.imap(_derive_candidate_worker, args_list, chunksize=50)
+        ):
+            results.append(res)
+            if progress_callback and (i % 500 == 0 or i == total - 1):
+                progress_callback(i + 1, total)
+
+    if addr_prefix:
+        pfx = addr_prefix.strip().lower()
+        results = [
+            r for r in results
+            if any(str(r.get(c, "")).lower().startswith(pfx) for c in coins)
+        ]
+
+    return results
+
+
 def _recover_chunk_worker(args) -> dict:
     """
     Multiprocessing worker for missing/partial-word recovery.

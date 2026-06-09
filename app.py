@@ -55,6 +55,7 @@ from recovery_utils import (
     estimate_recovery_time,
     list_bip39_languages,
     validate_mnemonic_multilang,
+    derive_addresses_bulk,
     MAX_MISSING_WORDS,
     MAX_ORDER_POSITIONS,
     _expand_pattern,
@@ -74,6 +75,7 @@ from derivation_utils import (
     derive_coin_addresses,
     find_address_match_extended,
     run_hardware_preset,
+    inspect_mnemonic,
 )
 from passphrase_utils import (
     build_candidate_list,
@@ -914,6 +916,101 @@ def render_data_table(headers, rows) -> None:
         cells = "".join(f"<td>{c if isinstance(c, str) and c.startswith('<span') else _esc(c)}</td>" for c in row)
         body += f"<tr>{cells}</tr>"
     st.markdown(f'<table class="cx-dt"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>', unsafe_allow_html=True)
+
+
+def render_seed_inspector(mnemonic: str, key_prefix: str = "si") -> None:
+    """
+    Post-recovery BIP39 inspector widget.
+    Renders inline below a recovered seed — derives addresses and private keys
+    for the selected coin without requiring the investigator to navigate away.
+    Auto-suppressed when more than 5 seeds are passed (bulk recovery output).
+    """
+    with st.expander("KEY INSPECTOR — derive addresses & private keys from this seed", expanded=False):
+        st.warning(
+            "SENSITIVE — output contains private keys. "
+            "Clear the session and close the browser tab when finished."
+        )
+        coin_options = {cid: cfg["label"] for cid, cfg in COIN_REGISTRY.items()}
+        col_a, col_b, col_c = st.columns([3, 1, 1])
+        with col_a:
+            coin_id = st.selectbox(
+                "COIN / NETWORK",
+                list(coin_options.keys()),
+                format_func=lambda k: coin_options[k],
+                key=f"{key_prefix}_coin",
+            )
+        with col_b:
+            acct = st.number_input("ACCOUNT", 0, 9, value=0, key=f"{key_prefix}_acct")
+        with col_c:
+            n_addr = st.number_input("ADDRESSES", 1, 20, value=5, key=f"{key_prefix}_n")
+
+        passphrase = st.text_input(
+            "BIP39 PASSPHRASE (25th word, leave blank if none)",
+            type="password",
+            key=f"{key_prefix}_pass",
+        )
+
+        if _btn("INSPECT", key=f"{key_prefix}_run", variant="orange"):
+            try:
+                result = inspect_mnemonic(
+                    mnemonic,
+                    passphrase=passphrase,
+                    coin_id=coin_id,
+                    account=int(acct),
+                    count=int(n_addr),
+                )
+            except ValueError as e:
+                st.error(str(e))
+                return
+
+            evm = result["evm_note"]
+            if evm:
+                st.info(evm)
+
+            with st.expander("BIP39 SEED (hex)", expanded=False):
+                st.code(result["seed_hex"], language="text")
+
+            with st.expander("BIP32 ROOT KEY", expanded=False):
+                st.text("Root xprv (master private key)")
+                st.code(result["root_xprv"], language="text")
+                st.text("Root xpub (master public key)")
+                st.code(result["root_xpub"], language="text")
+
+            with st.expander(f"ACCOUNT KEYS  ({result['derivation_base']})", expanded=False):
+                st.text("Account xprv")
+                st.code(result["account_xprv"], language="text")
+                st.text("Account xpub")
+                st.code(result["account_xpub"], language="text")
+
+            st.markdown(f"**Derived addresses — {result['coin_label']}**")
+            has_wif = any(r["priv_key_wif"] for r in result["rows"])
+            if has_wif:
+                headers = ["#", "PATH", "ADDRESS", "PUBLIC KEY", "PRIVATE KEY (HEX)", "PRIVATE KEY (WIF)"]
+                rows = [
+                    [
+                        str(r["index"]),
+                        r["path"],
+                        r["address"],
+                        r["pub_key_hex"],
+                        r["priv_key_hex"],
+                        r["priv_key_wif"] or "—",
+                    ]
+                    for r in result["rows"]
+                ]
+            else:
+                headers = ["#", "PATH", "ADDRESS", "PUBLIC KEY", "PRIVATE KEY (HEX)"]
+                rows = [
+                    [
+                        str(r["index"]),
+                        r["path"],
+                        r["address"],
+                        r["pub_key_hex"],
+                        r["priv_key_hex"],
+                    ]
+                    for r in result["rows"]
+                ]
+            render_data_table(headers, rows)
+            log_event("ok", f"Inspector: {result['coin_label']} account {acct}, {n_addr} address(es) derived")
 
 
 def render_active_case_banner() -> None:
@@ -1805,8 +1902,8 @@ def page_incomplete_seed():
         "MISSING WORDS · PARTIAL WORDS · BRUTE FORCE ENGINE",
     )
     col1, col2 = st.columns([3, 2])
-        with col1:
-            tab_missing, tab_extra, tab_btcr = st.tabs(["MISSING WORDS", "EXTRA WORD", "VERIFICATION ENGINE"])
+    with col1:
+        tab_missing, tab_extra, tab_btcr = st.tabs(["MISSING WORDS", "EXTRA WORD", "VERIFICATION ENGINE"])
 
         # ── Tab 1: Missing / Partial Word Recovery ─────────────────────────
         with tab_missing:
@@ -1909,19 +2006,22 @@ You may mix `?` and partial patterns freely. The total search space (product of 
 
             st.divider()
 
-            # ── recovery mode (with / without address) ─────────────────────
+            # ── recovery mode ───────────────────────────────────────────────
             mode = st.radio(
                 "RECOVERY MODE",
                 [
-                    "With Known Wallet Address  (results filtered to your address)",
-                    "Without Wallet Address  (all checksum-valid candidates returned)",
+                    "With Known Wallet Address  (exact match — returns 1 confirmed seed)",
+                    "With Partial Address Prefix  (know first few chars — filters + derives)",
+                    "Without Wallet Address  (auto-derives ETH + BTC for all candidates)",
                 ],
                 key="inc_mode",
                 horizontal=False,
             )
-            use_address = mode.startswith("With")
+            use_address = mode.startswith("With Known")
+            use_prefix = mode.startswith("With Partial")
 
             target = ""
+            addr_prefix = ""
             if use_address:
                 target = st.text_input(
                     "TARGET WALLET ADDRESS",
@@ -1930,15 +2030,25 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                 )
                 if not target.strip():
                     st.caption(
-                        "Enter the wallet address to confirm which candidate is correct. "
-                        "Without it the engine returns every checksum-valid phrase."
+                        "Enter the full wallet address to confirm which candidate is correct. "
+                        "The engine derives addresses from every candidate and returns the one that matches."
                     )
+            elif use_prefix:
+                addr_prefix = st.text_input(
+                    "ADDRESS PREFIX  (first characters you remember)",
+                    key="inc_prefix",
+                    placeholder="e.g.  0x3a4f  or  bc1q2x  or  1A8f",
+                )
+                st.caption(
+                    "Enter as many characters as you remember. The engine derives the first address "
+                    "for every candidate and returns only those whose address starts with this prefix. "
+                    "Even 4–6 characters typically cuts results to single digits."
+                )
             else:
                 st.caption(
-                    "No address filter — every BIP39 checksum-valid candidate is returned. "
-                    "Multiple results are normal; all are mathematically valid completions "
-                    "of your phrase. Use another tool (e.g. Address Generator) to identify "
-                    "the correct one."
+                    "No address provided — the engine derives the first ETH and BTC address "
+                    "for every checksum-valid candidate and displays them as a table. "
+                    "Scan the addresses to find the one you recognise."
                 )
 
             if _btn("RUN RECOVERY", key="inc_run", variant="orange"):
@@ -1946,6 +2056,7 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                     st.warning("Phrase must contain at least one '?' or a partial pattern (e.g. 'aban*') to indicate unknown/partial words.")
                 else:
                     target_arg = target.strip() or None
+                    addr_prefix_arg = addr_prefix.strip() or None
                     use_hybrid = bool(target_arg) and _btcr.is_available()
 
                     log_event("info", f"Starting recovery — {len(pattern_info)} variable position(s) — hybrid={use_hybrid}")
@@ -2088,6 +2199,7 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                                 st.success("WALLET SEED FOUND")
                                 st.code(hw_result["result"], language="text")
                                 st.session_state["recovery_candidates"] = [hw_result["result"]]
+                                render_seed_inspector(hw_result["result"], key_prefix="inc_si_hybrid")
                             elif hw_result["error"]:
                                 _tlog(f"ERROR: {hw_result['error']}")
                                 log_event("err", f"Verification engine error: {hw_result['error']}")
@@ -2170,33 +2282,87 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                             st.session_state["recovery_candidates"] = cand
 
                             if target_arg:
-                                for c in cand[:10]:
+                                for i, c in enumerate(cand[:10]):
                                     st.code(c, language="text")
-                            else:
-                                # No address — show first 100 and offer full download
-                                _ui_limit = min(100, len(cand))
-                                for c in cand[:_ui_limit]:
-                                    st.code(c, language="text")
-                                if len(cand) > _ui_limit:
-                                    st.warning(
-                                        f"Showing {_ui_limit} of {len(cand):,} checksum-valid candidates. "
-                                        "Download the full list below, or enter your wallet address above "
-                                        "to identify the correct seed automatically."
-                                    )
-                                st.download_button(
-                                    label=f"DOWNLOAD ALL {len(cand):,} CANDIDATES (.txt)",
-                                    data="\n".join(cand),
-                                    file_name="cryptex_candidates.txt",
-                                    mime="text/plain",
-                                    use_container_width=True,
+                                    if i < 5:
+                                        render_seed_inspector(c, key_prefix=f"inc_si_py_{i}")
+                            elif addr_prefix_arg or not target_arg:
+                                # Prefix-filter mode OR no-address auto-derive mode
+                                # Detect which coins to derive based on prefix shape
+                                if addr_prefix_arg:
+                                    pfx = addr_prefix_arg.lower()
+                                    if pfx.startswith("0x"):
+                                        _derive_coins = ["ETH"]
+                                    elif pfx.startswith("bc1"):
+                                        _derive_coins = ["BTC_native"]
+                                    elif pfx.startswith("3"):
+                                        _derive_coins = ["BTC_segwit"]
+                                    elif pfx.startswith("1"):
+                                        _derive_coins = ["BTC_legacy"]
+                                    else:
+                                        _derive_coins = ["ETH", "BTC_native", "BTC_legacy"]
+                                else:
+                                    _derive_coins = ["ETH", "BTC_native"]
+
+                                _coin_labels = {
+                                    "ETH": "ETH Address (m/44'/60'/0'/0/0)",
+                                    "BTC_native": "BTC Native SegWit (m/84'/0'/0'/0/0)",
+                                    "BTC_legacy": "BTC Legacy (m/44'/0'/0'/0/0)",
+                                    "BTC_segwit": "BTC SegWit (m/49'/0'/0'/0/0)",
+                                }
+
+                                _d_ph = st.empty()
+                                _d_bar = st.progress(0.0)
+                                _d_ph.info(
+                                    f"Deriving addresses for {len(cand):,} candidates "
+                                    f"({', '.join(_coin_labels[c] for c in _derive_coins)})…"
                                 )
-                                if len(cand) > 1:
-                                    st.info(
-                                        f"{len(cand):,} checksum-valid candidates found. "
-                                        "Enter your wallet address above to identify the correct one automatically."
+
+                                def _derive_cb(done, total):
+                                    pct = done / max(total, 1)
+                                    _d_bar.progress(pct)
+                                    _d_ph.info(
+                                        f"Deriving addresses… {done:,} / {total:,}  ({pct*100:.1f}%)"
                                     )
+
+                                _derived = derive_addresses_bulk(
+                                    cand,
+                                    coins=_derive_coins,
+                                    addr_prefix=addr_prefix_arg,
+                                    progress_callback=_derive_cb,
+                                )
+                                _d_bar.empty()
+                                _d_ph.empty()
+
+                                if not _derived:
+                                    st.error(
+                                        f"No candidates produced an address starting with "
+                                        f"'{addr_prefix_arg}'. Check the prefix and try again, "
+                                        "or switch to 'Without Wallet Address' mode to see all."
+                                    )
+                                else:
+                                    if addr_prefix_arg:
+                                        st.success(
+                                            f"Found {len(_derived)} candidate(s) matching prefix '{addr_prefix_arg}'."
+                                        )
+                                    else:
+                                        st.success(
+                                            f"Address derivation complete — {len(_derived):,} candidates."
+                                        )
+                                    # Build display table
+                                    _headers = ["SEED PHRASE"] + [_coin_labels[c] for c in _derive_coins]
+                                    _rows = [
+                                        [r["seed"]] + [r.get(c, "—") for c in _derive_coins]
+                                        for r in _derived
+                                    ]
+                                    render_data_table(_headers, _rows)
+                                    st.session_state["recovery_candidates"] = [r["seed"] for r in _derived]
+                                    if len(_derived) <= 5:
+                                        for _di, _dr in enumerate(_derived):
+                                            render_seed_inspector(_dr["seed"], key_prefix=f"inc_si_der_{_di}")
+
                             if result["truncated"]:
-                                st.warning("Result list truncated — enter your wallet address above to identify the correct seed automatically.")
+                                st.warning("Result list truncated — switch to 'With Known Wallet Address' mode and enter the address for a precise match.")
                         else:
                             log_event("warn", "No candidates produced")
                             if target_arg:
@@ -2294,11 +2460,13 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                         log_event("ok", f"Extra word removal: {len(xcands)} candidate(s)")
                         mode_label = "address-verified" if extra_target_arg else "checksum-valid"
                         st.success(f"Found {len(xcands)} {mode_label} candidate(s).")
-                        for xc in xcands:
+                        for _xi, xc in enumerate(xcands):
                             st.markdown(
                                 f"**Removed word #{xc['position']} — `{xc['removed_word']}`**"
                             )
                             st.code(xc["mnemonic"], language="text")
+                            if _xi < 5:
+                                render_seed_inspector(xc["mnemonic"], key_prefix=f"inc_si_xw_{_xi}")
                             st.markdown("---")
                         st.session_state["recovery_candidates"] = [xc["mnemonic"] for xc in xcands]
                     else:
@@ -4553,8 +4721,10 @@ def page_typo_lab():
                     mode_label = "address-verified" if ar_target_arg else "checksum-valid"
                     st.success(f"Found {len(ar_cands)} {mode_label} candidate(s).")
                     st.session_state["recovery_candidates"] = ar_cands
-                    for c in ar_cands[:10]:
+                    for _ti, c in enumerate(ar_cands[:10]):
                         st.code(c, language="text")
+                        if _ti < 5:
+                            render_seed_inspector(c, key_prefix=f"typo_si_{_ti}")
                     if ar_result.get("truncated"):
                         st.warning("Results truncated at 100 candidates.")
                 else:
@@ -4853,8 +5023,10 @@ def page_wrong_order():
                         if cand:
                             log_event("ok", f"Order recovery found {len(cand)} candidate(s) in {result['elapsed_time']:.2f}s")
                             st.success(f"Found {len(cand)} valid ordering(s) in {result['elapsed_time']:.2f} seconds.")
-                            for c in cand[:10]:
+                            for _oi, c in enumerate(cand[:10]):
                                 st.code(c, language="text")
+                                if _oi < 5:
+                                    render_seed_inspector(c, key_prefix=f"order_si_{_oi}")
                             if result["truncated"]:
                                 st.warning("Truncated at 100 candidates.")
                         else:

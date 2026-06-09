@@ -550,6 +550,92 @@ def derive_coin_addresses(
         del seed
 
 
+def inspect_mnemonic(
+    mnemonic: str,
+    passphrase: str = "",
+    coin_id: str = "ETH",
+    account: int = 0,
+    start_index: int = 0,
+    count: int = 10,
+) -> dict:
+    """
+    Full BIP39 → BIP32 inspector for a recovered seed.
+
+    Returns seed hex, root/account extended keys, and per-address rows that
+    include private keys. Intended for forensic post-recovery use only —
+    caller is responsible for handling the result securely.
+    """
+    if coin_id not in COIN_REGISTRY:
+        raise ValueError(f"Unknown coin_id {coin_id!r}")
+
+    info = validate_mnemonic(mnemonic)
+    if not info["valid"]:
+        raise ValueError("Mnemonic is not valid; cannot inspect.")
+
+    count = min(count, MAX_ADDRESSES_PER_REQUEST)
+    cfg = COIN_REGISTRY[coin_id]
+    bip_cls_name = cfg["bip_class"]
+    coin_enum = cfg["coin_enum"]
+    coin_type = cfg["coin_type"]
+    bip_num = {"bip44": 44, "bip49": 49, "bip84": 84}[bip_cls_name]
+
+    norm = " ".join(mnemonic.lower().split())
+    seed_bytes = Bip39SeedGenerator(norm).Generate(passphrase)
+
+    try:
+        if bip_cls_name == "bip44":
+            ctx = Bip44.FromSeed(seed_bytes, coin_enum)
+        elif bip_cls_name == "bip49":
+            ctx = Bip49.FromSeed(seed_bytes, coin_enum)
+        else:
+            ctx = Bip84.FromSeed(seed_bytes, coin_enum)
+
+        root_xprv = ctx.PrivateKey().ToExtendedKey()
+        root_xpub = ctx.PublicKey().ToExtendedKey()
+
+        acct_ctx = ctx.Purpose().Coin().Account(account)
+        acct_xprv = acct_ctx.PrivateKey().ToExtendedKey()
+        acct_xpub = acct_ctx.PublicKey().ToExtendedKey()
+
+        change_ctx = acct_ctx.Change(Bip44Changes.CHAIN_EXT)
+
+        rows: list[dict] = []
+        for i in range(start_index, start_index + count):
+            addr_ctx = change_ctx.AddressIndex(i)
+            priv_hex = addr_ctx.PrivateKey().Raw().ToHex()
+            pub_hex = addr_ctx.PublicKey().RawCompressed().ToHex()
+            address = addr_ctx.PublicKey().ToAddress()
+            wif: str | None = None
+            try:
+                wif = addr_ctx.PrivateKey().ToWif()
+            except Exception:
+                pass
+            rows.append({
+                "index": i,
+                "path": f"m/{bip_num}'/{coin_type}'/{account}'/0/{i}",
+                "address": address,
+                "pub_key_hex": pub_hex,
+                "priv_key_hex": priv_hex,
+                "priv_key_wif": wif,
+            })
+
+        return {
+            "coin_id": coin_id,
+            "coin_label": cfg["label"],
+            "coin_symbol": cfg["symbol"],
+            "evm_note": cfg.get("evm_note", ""),
+            "seed_hex": seed_bytes.hex(),
+            "root_xprv": root_xprv,
+            "root_xpub": root_xpub,
+            "account_xprv": acct_xprv,
+            "account_xpub": acct_xpub,
+            "derivation_base": f"m/{bip_num}'/{coin_type}'/{account}'",
+            "rows": rows,
+        }
+    finally:
+        del seed_bytes
+
+
 def find_address_match_extended(
     mnemonic: str,
     target_address: str,
