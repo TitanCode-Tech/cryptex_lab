@@ -1940,15 +1940,99 @@ You may mix `?` and partial patterns freely. The total search space (product of 
 """.format(_SEARCH_SPACE_CAP)
                 )
 
-            phrase = st.text_area(
-                "KNOWN WORDS — use '?' for unknown, 'prefix*' or '*suffix' for partial words",
-                value="",
-                key="inc_phrase",
-                height=100,
+            # ── input mode toggle ─────────────────────────────────────────
+            from wallet_utils import _english_wordlist, _normalize_mnemonic
+            _input_mode = st.radio(
+                "INPUT MODE",
+                ["SLOT GRID", "TEXT / WILDCARD"],
+                index=0,
+                horizontal=True,
+                key="inc_input_mode",
             )
 
+            if _input_mode == "SLOT GRID":
+                # ── word-slot grid (Seed Savior style) ────────────────────
+                _wl_set = frozenset(_english_wordlist())
+                _wl_sorted = sorted(_english_wordlist())
+
+                # ── paste / auto-detect ────────────────────────────────────
+                _paste_val = st.text_input(
+                    "PASTE PHRASE — auto-fills all slots",
+                    key="inc_grid_paste",
+                    placeholder="Paste your full mnemonic here to auto-fill the word slots…",
+                )
+                if _paste_val.strip():
+                    _pw = _paste_val.strip().lower().split()
+                    if len(_pw) > 1:
+                        _detected_len = len(_pw) if len(_pw) in [12, 15, 18, 21, 24] else None
+                        if _detected_len:
+                            st.session_state["inc_grid_wcount"] = _detected_len
+                        _fill_count = _detected_len or st.session_state.get("inc_grid_wcount", 12)
+                        for _wi in range(24):
+                            st.session_state[f"inc_grid_w{_wi}"] = _pw[_wi] if _wi < len(_pw) else ""
+                        st.session_state["inc_grid_paste"] = ""
+                        st.rerun()
+
+                _word_count = st.select_slider(
+                    "PHRASE LENGTH",
+                    options=[12, 15, 18, 21, 24],
+                    value=st.session_state.get("inc_grid_wcount", 12),
+                    key="inc_grid_wcount",
+                )
+
+                _grid_words: list[str] = []
+                _n_cols = 4
+                import math as _math
+                _n_rows = _math.ceil(_word_count / _n_cols)
+
+                for _row in range(_n_rows):
+                    _gcols = st.columns(_n_cols)
+                    for _ci, _gc in enumerate(_gcols):
+                        _wi = _row * _n_cols + _ci
+                        if _wi >= _word_count:
+                            _grid_words.append("")
+                            continue
+                        with _gc:
+                            _slot_key = f"inc_grid_w{_wi}"
+                            _val = st.text_input(
+                                f"Word {_wi + 1}",
+                                key=_slot_key,
+                                placeholder="?",
+                            )
+                            _norm = _val.strip().lower()
+                            if _norm and _norm != "?" and _WILDCARD not in _norm:
+                                if _norm in _wl_set:
+                                    st.caption(":green[✓ valid]")
+                                else:
+                                    import difflib as _difflib
+                                    _close = _difflib.get_close_matches(_norm, _wl_sorted, n=3, cutoff=0.55)
+                                    if _close:
+                                        st.caption(":red[✗]  → " + "  |  ".join(_close))
+                                    else:
+                                        st.caption(":red[✗ not in BIP39]")
+                            _grid_words.append(_norm)
+
+                # Assemble phrase: empty slot → "?"
+                # Only produce a phrase if at least one slot has been filled
+                _any_filled = any(w and w != "?" for w in _grid_words[:_word_count])
+                phrase = " ".join(w if w else "?" for w in _grid_words[:_word_count]) if _any_filled else ""
+
+                # Convenience: clear all slots
+                if st.button("CLEAR ALL SLOTS", key="inc_grid_clear"):
+                    for _wi in range(_word_count):
+                        st.session_state[f"inc_grid_w{_wi}"] = ""
+                    st.rerun()
+
+            else:
+                # ── original text area (supports wildcards / patterns) ─────
+                phrase = st.text_area(
+                    "KNOWN WORDS — use '?' for unknown, 'prefix*' or '*suffix' for partial words",
+                    value="",
+                    key="inc_phrase",
+                    height=100,
+                )
+
             # ── live pattern analysis ──────────────────────────────────────
-            from wallet_utils import _english_wordlist, _normalize_mnemonic
             pattern_info: list[dict] = []
             search_space_estimate = 1
             has_any_variable = False
@@ -2249,7 +2333,7 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                                 target_address=target_arg,
                                 max_unknowns=MAX_MISSING_WORDS,
                                 progress_callback=_py_cb,
-                                max_returned=0 if not target_arg else _MAX_RETURNED_CANDIDATES,
+                                max_returned=_MAX_RETURNED_CANDIDATES,
                             )
                         except ValueError as e:
                             log_event("err", f"Recovery error: {e}")
