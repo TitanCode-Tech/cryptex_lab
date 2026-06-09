@@ -2342,7 +2342,10 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                                 progress_callback=_py_cb,
                                 # No cap for address/prefix modes — sweep the full space.
                                 # Cap for no-address mode to avoid overwhelming results.
-                                max_returned=0 if (target_arg or addr_prefix_arg) else _MAX_RETURNED_CANDIDATES,
+                                # 1 unknown → collect all ~128 checksum-valid candidates
+                                #   (manageable to display like Seed Savior).
+                                # 2 unknowns, no address → cap at 50; user should provide prefix.
+                                max_returned=0 if (target_arg or addr_prefix_arg or len(pattern_info) == 1) else 50,
                             )
                         except ValueError as e:
                             log_event("err", f"Recovery error: {e}")
@@ -2439,37 +2442,102 @@ You may mix `?` and partial patterns freely. The total search space (product of 
                                         for _di, _dr in enumerate(_derived):
                                             render_seed_inspector(_dr["seed"], key_prefix=f"inc_si_der_{_di}")
                             else:
-                                # No-address mode — derive ETH + BTC for all candidates
-                                _derive_coins = ["ETH", "BTC_native"]
-                                _coin_labels = {
-                                    "ETH": "ETH Address (m/44'/60'/0'/0/0)",
-                                    "BTC_native": "BTC Native SegWit (m/84'/0'/0'/0/0)",
-                                }
-                                _d_ph = st.empty()
-                                _d_bar = st.progress(0.0)
-                                _d_ph.info(f"Deriving addresses for {len(cand)} candidates…")
+                                # No-address mode — derive all standard paths for every candidate.
+                                from derivation_utils import derive_coin_addresses, derive_arbitrary_path as _dap
 
-                                def _derive_cb2(done, total):
-                                    pct = done / max(total, 1)
-                                    _d_bar.progress(pct)
-                                    _d_ph.info(f"Deriving addresses… {done} / {total}")
-
-                                _derived2 = derive_addresses_bulk(cand, coins=_derive_coins, progress_callback=_derive_cb2)
-                                _d_bar.empty()
-                                _d_ph.empty()
-                                _headers = ["SEED PHRASE"] + [_coin_labels[c] for c in _derive_coins]
-                                _rows = [
-                                    [r["seed"]] + [r.get(c, "—") for c in _derive_coins]
-                                    for r in _derived2
+                                _COIN_SLOTS = [
+                                    ("BTC_LEGACY",  "BTC BIP44 Legacy",          "m/44'/0'/0'/0/0"),
+                                    ("BTC_SEGWIT",  "BTC BIP49 SegWit",          "m/49'/0'/0'/0/0"),
+                                    ("BTC_NATIVE",  "BTC BIP84 Bech32",          "m/84'/0'/0'/0/0"),
+                                    ("ETH",         "ETH BIP44",                 "m/44'/60'/0'/0/0"),
+                                    ("ETH_BIP32",   "ETH BIP32 Legacy Ledger",   "m/44'/60'/0'/0"),
+                                    ("XRP",         "XRP",                       "m/44'/144'/0'/0/0"),
+                                    ("LTC_LEGACY",  "LTC",                       "m/44'/2'/0'/0/0"),
                                 ]
-                                render_data_table(_headers, _rows)
-                                st.session_state["recovery_candidates"] = [r["seed"] for r in _derived2]
-                                if len(_derived2) <= 5:
-                                    for _di, _dr in enumerate(_derived2):
-                                        render_seed_inspector(_dr["seed"], key_prefix=f"inc_si_der_{_di}")
 
-                            if result["truncated"]:
-                                st.warning("Result list truncated — provide a wallet address or prefix for a precise match.")
+                                _d_ph = st.empty()
+                                _d_bar2 = st.progress(0.0)
+                                _d_ph.info(f"Deriving addresses for {len(cand)} candidate(s)…")
+
+                                _derived2 = []
+                                for _mi, _mn in enumerate(cand):
+                                    _row: dict = {"seed": _mn}
+                                    for _cid, _clabel, _cpath in _COIN_SLOTS:
+                                        try:
+                                            if _cid == "ETH_BIP32":
+                                                _r = _dap(_mn, "m/44'/60'/0'/0", coin="ETH")
+                                                _row[_cid] = _r.get("address", "—")
+                                            else:
+                                                _rs = derive_coin_addresses(_mn, _cid, count=1)
+                                                _row[_cid] = _rs[0]["address"] if _rs else "—"
+                                        except Exception:
+                                            _row[_cid] = "—"
+                                    _derived2.append(_row)
+                                    _d_bar2.progress((_mi + 1) / len(cand))
+                                    _d_ph.info(f"Deriving addresses… {_mi + 1} / {len(cand)}")
+
+                                _d_bar2.empty()
+                                _d_ph.empty()
+
+                                _orig_words = phrase.strip().split()
+                                _unknown_idxs = {i for i, w in enumerate(_orig_words) if w in ("?", "??")}
+                                _n_unknowns = len(pattern_info)
+
+                                if _n_unknowns == 1:
+                                    # ── 1 missing word: show ALL ~128 candidates as a
+                                    #    compact table — same approach as Seed Savior.
+                                    st.success(
+                                        f"Found **{len(_derived2)} checksum-valid candidate(s)** for the missing word. "
+                                        "Scan the table to spot your wallet address."
+                                    )
+                                    _tbl_headers = ["Recovered Word"] + [f"{_clabel}\n{_cpath}" for _, _clabel, _cpath in _COIN_SLOTS]
+                                    _tbl_rows = []
+                                    for _dr in _derived2:
+                                        _cw = _dr["seed"].split()
+                                        _filled = [_cw[i] for i in sorted(_unknown_idxs) if i < len(_cw)]
+                                        _tbl_rows.append(
+                                            [", ".join(_filled)] + [_dr.get(_cid, "—") for _cid, _, _ in _COIN_SLOTS]
+                                        )
+                                    render_data_table(_tbl_headers, _tbl_rows)
+                                    # Inspector for whichever row the user selects via session state
+                                    st.markdown("##### Inspect a candidate")
+                                    _inspect_opts = {
+                                        f"Candidate {_i+1} — {_dr['seed'].split()[list(_unknown_idxs)[0]] if _unknown_idxs else ''}": _dr["seed"]
+                                        for _i, _dr in enumerate(_derived2)
+                                    }
+                                    _inspect_sel = st.selectbox("Select candidate to inspect", list(_inspect_opts.keys()), key="inc_noaddr_inspect_sel")
+                                    if _inspect_sel:
+                                        render_seed_inspector(_inspect_opts[_inspect_sel], key_prefix="inc_noaddr_inspect")
+                                else:
+                                    # ── 2 unknowns: show top 50 as cards + prompt for address
+                                    st.warning(
+                                        f"Showing first **{len(_derived2)}** of ~260,000 checksum-valid candidates. "
+                                        "With 2 unknown words the full list is too large to scan. "
+                                        "**Enter your wallet address or a few characters of it above** for an exact match."
+                                    )
+                                    for _di, _dr in enumerate(_derived2):
+                                        _cand_words = _dr["seed"].split()
+                                        _filled_words = [_cand_words[i] for i in sorted(_unknown_idxs) if i < len(_cand_words)]
+                                        _filled_str = ", ".join(f'"{w}"' for w in _filled_words)
+                                        _phrase_parts = [f"**{_w}**" if _wi in _unknown_idxs else _w for _wi, _w in enumerate(_cand_words)]
+                                        with st.expander(f"Candidate {_di + 1} — words: {_filled_str}", expanded=(_di == 0)):
+                                            st.markdown(" ".join(_phrase_parts))
+                                            st.markdown("---")
+                                            _c1, _c2 = st.columns(2)
+                                            with _c1:
+                                                for _cid, _clabel, _cpath in _COIN_SLOTS[:4]:
+                                                    st.markdown(f"**{_clabel}** `{_cpath}`")
+                                                    st.code(_dr.get(_cid, "—"), language="text")
+                                            with _c2:
+                                                for _cid, _clabel, _cpath in _COIN_SLOTS[4:]:
+                                                    st.markdown(f"**{_clabel}** `{_cpath}`")
+                                                    st.code(_dr.get(_cid, "—"), language="text")
+                                            render_seed_inspector(_dr["seed"], key_prefix=f"inc_si_der_{_di}")
+
+                                st.session_state["recovery_candidates"] = [r["seed"] for r in _derived2]
+
+                            if result["truncated"] and (target_arg or addr_prefix_arg):
+                                st.warning("Result list truncated — provide a more specific wallet address or prefix for a precise match.")
                         else:
                             log_event("warn", "No candidates produced")
                             if target_arg:
